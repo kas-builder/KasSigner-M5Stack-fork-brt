@@ -1,0 +1,19 @@
+KASSIGNER BRT FORK CHANGE RECORD 019
+
+Change:
+Identify the consolidated M5Stack firmware as 1.0-brt-fork.
+
+Files:
+bootloader/src/version.rs
+bootloader/src/hw/display_m5.rs
+bootloader/src/hw/display_ws.rs
+
+Behavior:
+The startup verification screen displays 1.0-brt-fork so a user can distinguish
+this independently built firmware from the official KasSigner release.
+
+Safety:
+The machine-readable firmware version remains 1.0.4. This avoids changing update
+ordering or rollback behavior merely to provide a human-readable fork label.
+
+No artificial startup delay is added.

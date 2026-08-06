@@ -588,6 +588,7 @@ impl<'a> BootDisplay<'a> {
         let title = "Startup verification";
         let tw = measure_header(title);
         draw_oswald_header(&mut self.display, title, (320 - tw) / 2, 25, KASPA_TEAL);
+        draw_lato_hint(&mut self.display, crate::version::DISPLAY_LABEL, 18, 40, COLOR_TEXT_DIM);
 
         for (i, label) in LABELS.iter().enumerate() {
             let y = 52 + (i as i32 * 21);
