@@ -36,7 +36,6 @@ fn zeroize_seed(buf: &mut [u8]) {
         unsafe { core::ptr::write_volatile(b, 0); }
     }
 }
-use crate::hw::display::BootStatus;
 use crate::halt_forever;
 
 /// Derive all 20 Kaspa pubkeys from the active seed into cache.
@@ -439,73 +438,66 @@ pub fn run_firmware_verify(
     log!("   Hash display: {}", hash_short.as_str());
 
     // ── Show logo while verification runs in background ────────
-    boot_display.show_logo_screen().ok();
+    boot_display.set_security_firmware_hash(hash_short.as_str()).ok();
+    boot_display.set_security_test_state(6, 1, 0).ok();
+    let started = esp_hal::time::Instant::now();
 
     // ── Run firmware verification (logo visible during computation) ──
     let verify_result = firmware_info.verify_firmware(FIRMWARE_START_ADDR, FIRMWARE_MAX_SIZE);
+    let elapsed = (esp_hal::time::Instant::now() - started).as_millis() as u32;
 
     // Hold logo for ~3s total (verify_firmware is near-instant)
-    delay.delay_millis(3000);
 
     match verify_result {
         VerificationResult::HashValidOnly => {
             log!("Firmware code hash matched; developer signature not authenticated");
-            boot_display
-                .show_verification_screen(
-                    version_str.as_str(),
-                    hash_short.as_str(),
-                    BootStatus::HashOnly,
-                )
-                .ok();
-            delay.delay_millis(2500);
+            boot_display.set_security_test_state(6, 4, elapsed).ok();
         }
         VerificationResult::Valid => {
             log!("Firmware verified OK");
 
             // Flash "Verified OK" briefly before entering app
-            boot_display
-                .show_verification_screen(
-                    version_str.as_str(),
-                    hash_short.as_str(),
-                    BootStatus::Valid,
-                )
-                .ok();
-
-            delay.delay_millis(2500);
+            boot_display.set_security_test_state(6, 2, elapsed).ok();
         }
 
         VerificationResult::InvalidHash => {
             log!("CRITICAL: Firmware hash mismatch!");
+            boot_display.set_security_test_state(6, 3, elapsed).ok();
             boot_display.show_panic_screen("HASH INVALID").ok();
             halt_forever(delay);
         }
 
         VerificationResult::InvalidSignature => {
             log!("CRITICAL: Firmware signature invalid — UNSIGNED OR TAMPERED!");
+            boot_display.set_security_test_state(6, 3, elapsed).ok();
             boot_display.show_panic_screen("SIGNATURE INVALID").ok();
             halt_forever(delay);
         }
 
         VerificationResult::VersionTooOld => {
             log!("CRITICAL: Version too old!");
+            boot_display.set_security_test_state(6, 3, elapsed).ok();
             boot_display.show_panic_screen("VERSION TOO OLD").ok();
             halt_forever(delay);
         }
 
         VerificationResult::ReadError => {
             log!("ERROR: Could not read firmware");
+            boot_display.set_security_test_state(6, 3, elapsed).ok();
             boot_display.show_panic_screen("READ ERROR").ok();
             halt_forever(delay);
         }
 
         VerificationResult::FlowViolation => {
             log!("CRITICAL: Flow counter violation — possible fault injection!");
+            boot_display.set_security_test_state(6, 3, elapsed).ok();
             boot_display.show_panic_screen("FLOW VIOLATION").ok();
             halt_forever(delay);
         }
 
         VerificationResult::CanaryCorrupt => {
             log!("CRITICAL: Canary corrupt — possible fault injection!");
+            boot_display.set_security_test_state(6, 3, elapsed).ok();
             boot_display.show_panic_screen("TAMPER DETECT").ok();
             halt_forever(delay);
         }

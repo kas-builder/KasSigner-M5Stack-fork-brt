@@ -21,6 +21,10 @@
 
 use crate::{features::fw_update, hw::sd_backup, ui::seed_manager, ui::setup_wizard, wallet};
 
+pub const DEFAULT_BRIGHTNESS: u8 = 192; // Displays as 75% on the 0..255 scale.
+#[cfg(feature = "m5stack")]
+pub const DEFAULT_VOLUME: u8 = 18; // Displays as 7% on the 0..255 scale.
+
 /// Envelope format of the transaction payload currently loaded in AppData.
 /// Determines which serializer to use for the signed-response QR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,7 +545,7 @@ pub fn new() -> Self {
             cr_part_a: alloc::vec::Vec::new(),
             cr_part_b: alloc::vec::Vec::new(),
 
-            brightness: 102,
+            brightness: DEFAULT_BRIGHTNESS,
 
             #[cfg(feature = "waveshare")]
             cam_tune_active: false,
@@ -579,7 +583,7 @@ pub fn new() -> Self {
             cam_tap_ready: false,
 
             #[cfg(feature = "m5stack")]
-            volume: 18,
+            volume: DEFAULT_VOLUME,
         }
     }
 

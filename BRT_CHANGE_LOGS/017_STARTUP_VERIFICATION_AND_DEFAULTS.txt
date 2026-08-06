@@ -1,0 +1,42 @@
+KASSIGNER SECURITY AND UX CHANGE RECORD 017
+
+Branch:
+fix/startup-self-tests-ui
+
+Summary:
+Replaced the unexplained black-screen startup delay with a persistent checklist
+of real security tests, PASS/FAIL/DEV results, measured execution times, and the
+public firmware hash prefix.
+
+Security behavior:
+Hardware, RNG, dice, seed/passphrase, encrypted storage, firmware policy,
+firmware integrity, and transaction-signing checks are visibly connected to
+their real results. Required failures stop boot. The signing-pipeline test now
+fails closed instead of logging a failure and continuing.
+
+Performance:
+Removed display-only waits of 3000 ms and 2500 ms. Optimized BIP39 PBKDF2 by
+precomputing the unchanged HMAC hash states. Exhaustive storage/boundary tests
+remain available in the verbose diagnostic suite while a focused known-answer
+subset runs on every normal boot.
+
+Privacy:
+The checklist receives only fixed public labels, numeric status, elapsed
+milliseconds, and the public firmware hash prefix. It never receives mnemonic,
+passphrase, dice-roll, seed, private-key, account-key, or signature data.
+
+Defaults:
+M5Stack boots at 75 percent display brightness (192/255) and 7 percent speaker
+volume (18/255).
+
+Verification completed:
+M5Stack release build passed.
+Waveshare release build passed.
+Verbose M5Stack diagnostic build passed.
+Hash-aware M5Stack development build converged.
+Physical M5Stack startup passed.
+An intentionally corrupted public dice golden vector produced Dice FAIL and
+prevented boot; restoring the correct vector restored normal boot.
+
+No production developer signature is claimed. The tested firmware is an
+unsigned development build.

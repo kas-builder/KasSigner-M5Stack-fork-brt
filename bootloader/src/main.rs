@@ -219,7 +219,6 @@ fn main() -> ! {
     hw::lockdown::early_lockdown();
 
     // ─── Phase 1: Hardware self-tests ────────────────────────────
-    app::boot_test::run_phase1_tests(&mut delay);
 
     // ═══════════════════════════════════════════════════════════════
     // Phase 2: Initialize peripherals (PLATFORM-SPECIFIC)
@@ -373,8 +372,8 @@ fn main() -> ! {
                 Err(e) => log!("   LEDC backlight channel FAILED: {:?}", e),
             }
 
-            hw::pmu::set_brightness(&mut i2c, 102);
-            log!("   Backlight ON via PWM (brightness=102)");
+            hw::pmu::set_brightness(&mut i2c, app::data::DEFAULT_BRIGHTNESS);
+            log!("   Backlight ON via PWM (brightness=75%)");
         }
 
         // ── Verify XCLK toggling ──
@@ -576,7 +575,7 @@ fn main() -> ! {
                 Err(e) => { log!("   AW88298 FAILED: {} (no sound)", e); false }
             };
             if sound_ok && _i2s_tx_ready {
-                hw::sound::set_volume(18);
+                hw::sound::set_volume(app::data::DEFAULT_VOLUME);
                 hw::sound::set_dma_buffer(dma_buf_ptr, dma_buf_len);
                 hw::sound::boot_tone(&mut delay);
             }
@@ -608,7 +607,7 @@ fn main() -> ! {
                 continue_without_display(&mut delay);
             }
         };
-        hw::pmu::set_brightness(&mut i2c, 102);
+        hw::pmu::set_brightness(&mut i2c, app::data::DEFAULT_BRIGHTNESS);
 
         // Camera (GC0308 + DVP)
         log!("   GC0308 Camera init...");
@@ -684,6 +683,10 @@ fn main() -> ! {
         halt_forever(&mut delay);
     }
 
+    // Run potentially slow startup checks only after the display exists so
+    // users see real progress instead of an unexplained black screen.
+    app::boot_test::run_phase1_tests(&mut boot_display, &mut delay);
+
     // ─── Phase 3: Verify firmware integrity ──────────────────────
     app::signing::run_firmware_verify(&mut boot_display, &mut delay);
 
@@ -727,7 +730,7 @@ fn main() -> ! {
     // M5Stack runs signing pipeline test at boot
     #[cfg(feature = "m5stack")]
     #[cfg(not(feature = "skip-tests"))]
-    run_signing_pipeline_test(ad);
+    run_signing_pipeline_test(ad, &mut boot_display, &mut delay);
 
     log!("   Touch ready — tap menu items to navigate");
 
@@ -1312,14 +1315,27 @@ fn touch_zones() -> (
 
 /// M5Stack: signing pipeline self-test at boot
 #[cfg(feature = "m5stack")]
-fn run_signing_pipeline_test(ad: &mut AppData) {
+fn run_signing_pipeline_test(
+    ad: &mut AppData,
+    boot_display: &mut hw::display::BootDisplay<'_>,
+    delay: &mut Delay,
+) {
+    boot_display.set_security_test_state(7, 1, 0).ok();
+    let started = esp_hal::time::Instant::now();
+
     let test_words = ["girl", "mad", "pet", "galaxy", "egg", "matter",
                       "matrix", "prison", "refuse", "sense", "ordinary", "nose"];
     for (i, word) in test_words.iter().enumerate() {
         ad.mnemonic_indices[i] = wallet::bip39::word_to_index(word).unwrap_or(0);
     }
     ad.word_count = 12;
-    ad.seed_mgr.store(&ad.mnemonic_indices, 12, b"", 0);
+    if ad.seed_mgr.store(&ad.mnemonic_indices, 12, b"", 0) != Some(0) {
+        let elapsed = (esp_hal::time::Instant::now() - started).as_millis() as u32;
+        log!("   [FATAL] Signing test seed setup failed");
+        boot_display.set_security_test_state(7, 3, elapsed).ok();
+        boot_display.show_panic_screen("SIGN TEST SETUP FAILED").ok();
+        halt_forever(delay);
+    }
     ad.seed_loaded = true;
 
     // Signing pipeline test — M5Stack only.
@@ -1329,6 +1345,12 @@ fn run_signing_pipeline_test(ad: &mut AppData) {
     {
         let ok = app::boot_test::test_signing_pipeline(ad);
         log!("   Signing pipeline test: {}", if ok { "OK" } else { "FAIL" });
+        if !ok {
+            let elapsed = (esp_hal::time::Instant::now() - started).as_millis() as u32;
+            boot_display.set_security_test_state(7, 3, elapsed).ok();
+            boot_display.show_panic_screen("SIGNING TEST FAILED").ok();
+            halt_forever(delay);
+        }
     }
     #[cfg(feature = "waveshare")]
     log!("   Signing pipeline test: skipped (waveshare stack limit)");
@@ -1338,6 +1360,9 @@ fn run_signing_pipeline_test(ad: &mut AppData) {
     ad.word_count = 0;
     ad.mnemonic_indices = [0; 24];
     ad.pubkeys_cached = false;
+
+    let elapsed = (esp_hal::time::Instant::now() - started).as_millis() as u32;
+    boot_display.set_security_test_state(7, 2, elapsed).ok();
 }
 
 /// Handle wake-from-sleep on touch. Returns true if main loop should `continue`.

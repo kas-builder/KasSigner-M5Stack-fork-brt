@@ -511,6 +511,9 @@ pub(crate) type BootDisplayTarget<'a> = Ili9342Display<'a>;
 /// BootDisplay for M5Stack CoreS3 — 320x240 IPS color LCD
 pub struct BootDisplay<'a> {
     pub(crate) display: BootDisplayTarget<'a>,
+    security_status: [u8; 8],
+    security_elapsed_ms: [u32; 8],
+    security_hash: [u8; 16],
 }
 
 impl<'a> BootDisplay<'a> {
@@ -555,10 +558,72 @@ impl<'a> BootDisplay<'a> {
             tee
         };
 
-        Ok(Self { display })
+        Ok(Self {
+            display,
+            security_status: [0; 8],
+            security_elapsed_ms: [0; 8],
+            security_hash: [0; 16],
+        })
     }
 
     // ─── Boot sequence screens ──────────────────────────────────
+
+    /// Display a persistent checklist of public, fixed-input startup tests.
+    /// State: 0=pending, 1=running, 2=pass, 3=fail, 4=development warning.
+    pub fn set_security_test_state(
+        &mut self, index: usize, state: u8, elapsed_ms: u32,
+    ) -> Result<(), &'static str> {
+        const LABELS: [&str; 8] = [
+            "Hardware integrity", "Random generator", "Dice logic",
+            "Seed/passphrase", "Encrypted storage", "Firmware policy",
+            "Firmware integrity", "Transaction signing",
+        ];
+        if index >= LABELS.len() || state > 4 {
+            return Err("Invalid security test state");
+        }
+        self.security_status[index] = state;
+        self.security_elapsed_ms[index] = elapsed_ms;
+        self.display.clear(COLOR_BG).map_err(|_| "Clear failed")?;
+
+        let title = "Startup verification";
+        let tw = measure_header(title);
+        draw_oswald_header(&mut self.display, title, (320 - tw) / 2, 25, KASPA_TEAL);
+
+        for (i, label) in LABELS.iter().enumerate() {
+            let y = 52 + (i as i32 * 21);
+            draw_lato_hint(&mut self.display, label, 18, y, COLOR_TEXT);
+            let (status, color) = match self.security_status[i] {
+                1 => ("RUN", COLOR_ORANGE),
+                2 => ("PASS", KASPA_TEAL),
+                3 => ("FAIL", COLOR_DANGER),
+                4 => ("DEV", COLOR_ORANGE),
+                _ => ("--", COLOR_TEXT_DIM),
+            };
+            draw_lato_hint(&mut self.display, status, 205, y, color);
+            if self.security_status[i] >= 2 {
+                let mut timing = heapless::String::<20>::new();
+                use core::fmt::Write;
+                write!(&mut timing, "{} ms", self.security_elapsed_ms[i]).ok();
+                draw_lato_hint(&mut self.display, timing.as_str(), 252, y, COLOR_TEXT_DIM);
+            }
+        }
+        if self.security_hash[0] != 0 {
+            let hash = core::str::from_utf8(&self.security_hash).unwrap_or("hash unavailable");
+            draw_lato_hint(&mut self.display, "Hash", 18, 225, COLOR_TEXT_DIM);
+            draw_lato_hint(&mut self.display, hash, 62, 225, COLOR_TEXT_DIM);
+        }
+        Ok(())
+    }
+
+    pub fn set_security_firmware_hash(&mut self, hash: &str) -> Result<(), &'static str> {
+        self.security_hash.fill(0);
+        let bytes = hash.as_bytes();
+        if bytes.len() < self.security_hash.len() || !bytes[..16].iter().all(u8::is_ascii_hexdigit) {
+            return Err("Invalid firmware hash display");
+        }
+        self.security_hash.copy_from_slice(&bytes[..16]);
+        self.set_security_test_state(6, self.security_status[6], self.security_elapsed_ms[6])
+    }
 
     /// Show verification screen with version, hash, and status
     pub fn show_verification_screen(

@@ -23,6 +23,7 @@ extern crate alloc;
 use crate::log;
 use crate::{qr::encoder, wallet, features::self_test, app::input, ui::pin_ui, ui::setup_wizard, ui::seed_manager};
 use crate::features::self_test::run_all_tests;
+use esp_hal::time::Instant;
 
 /// Decode QR from grayscale image using rqrr. Returns Option<(data, len)>.
 fn rqrr_test_decode(img: &[u8], w: usize, h: usize) -> Option<alloc::vec::Vec<u8>> {
@@ -169,11 +170,17 @@ pub fn run_boot_tests() {
 }
 
 /// Run Phase 1 self-tests (crypto, BIP39, QR encoder, etc.)
-pub fn run_phase1_tests(delay: &mut esp_hal::delay::Delay) {
+pub fn run_phase1_tests(
+    boot_display: &mut crate::hw::display::BootDisplay<'_>,
+    delay: &mut esp_hal::delay::Delay,
+) {
     log!("Phase 1: Self-Tests");
     log!("─────────────────────────");
 
+    boot_display.set_security_test_state(0, 1, 0).ok();
+    let started = Instant::now();
     let test_results = run_all_tests();
+    let elapsed = (Instant::now() - started).as_millis() as u32;
 
     if !test_results.all_passed {
         log!();
@@ -183,58 +190,92 @@ pub fn run_phase1_tests(delay: &mut esp_hal::delay::Delay) {
         log!("   Flash:  {}", if test_results.flash_ok { "OK" } else { "FAIL" });
         log!("   SHA256: {}", if test_results.sha256_ok { "OK" } else { "FAIL" });
         log!("   Cannot continue safely.");
+        boot_display.set_security_test_state(0, 3, elapsed).ok();
+        boot_display.show_panic_screen("HARDWARE TEST FAILED").ok();
         // Permanent halt — do not boot with defective hardware
         loop {
             delay.delay_millis(1000);
         }
     }
+    boot_display.set_security_test_state(0, 2, elapsed).ok();
 
+    boot_display.set_security_test_state(1, 1, 0).ok();
+    let started = Instant::now();
     let (entropy_passed, entropy_total) = crate::crypto::entropy::run_self_tests();
+    let elapsed = (Instant::now() - started).as_millis() as u32;
     log!("   Entropy tests: {}/{} passed", entropy_passed, entropy_total);
     if entropy_passed != entropy_total {
         log!("   CRITICAL: Cryptographic RNG self-test failed.");
         log!("   Cannot continue safely.");
+        boot_display.set_security_test_state(1, 3, elapsed).ok();
+        boot_display.show_panic_screen("RNG TEST FAILED").ok();
         loop {
             delay.delay_millis(1000);
         }
     }
+    boot_display.set_security_test_state(1, 2, elapsed).ok();
 
+    boot_display.set_security_test_state(2, 1, 0).ok();
+    let started = Instant::now();
     let (dice_passed, dice_total) = setup_wizard::run_dice_security_tests();
+    let elapsed = (Instant::now() - started).as_millis() as u32;
     log!("   Mandatory dice tests: {}/{} passed", dice_passed, dice_total);
     if dice_passed != dice_total {
         log!("   CRITICAL: Mandatory dice security test failed.");
         log!("   Cannot continue safely.");
+        boot_display.set_security_test_state(2, 3, elapsed).ok();
+        boot_display.show_panic_screen("DICE TEST FAILED").ok();
         loop {
             delay.delay_millis(1000);
         }
     }
+    boot_display.set_security_test_state(2, 2, elapsed).ok();
 
+    boot_display.set_security_test_state(3, 1, 0).ok();
+    let started = Instant::now();
     let (seed_passed, seed_total) = seed_manager::run_seed_security_tests();
+    let elapsed = (Instant::now() - started).as_millis() as u32;
     log!("   Mandatory seed tests: {}/{} passed", seed_passed, seed_total);
     if seed_passed != seed_total {
         log!("   CRITICAL: Mandatory seed or passphrase security test failed.");
         log!("   Cannot continue safely.");
+        boot_display.set_security_test_state(3, 3, elapsed).ok();
+        boot_display.show_panic_screen("SEED TEST FAILED").ok();
         loop {
             delay.delay_millis(1000);
         }
     }
+    boot_display.set_security_test_state(3, 2, elapsed).ok();
 
-    if !crate::hw::sd_backup::test_raw_128_byte_roundtrip() {
+    boot_display.set_security_test_state(4, 1, 0).ok();
+    let started = Instant::now();
+    let storage_ok = crate::hw::sd_backup::test_raw_128_byte_roundtrip();
+    let elapsed = (Instant::now() - started).as_millis() as u32;
+    if !storage_ok {
         log!("   CRITICAL: Mandatory 128-byte encrypted payload test failed.");
         log!("   Cannot continue safely.");
+        boot_display.set_security_test_state(4, 3, elapsed).ok();
+        boot_display.show_panic_screen("STORAGE TEST FAILED").ok();
         loop {
             delay.delay_millis(1000);
         }
     }
+    boot_display.set_security_test_state(4, 2, elapsed).ok();
     log!("   Mandatory encrypted payload test: passed");
 
-    if !crate::features::verify::test_signature_metadata_policy() {
+    boot_display.set_security_test_state(5, 1, 0).ok();
+    let started = Instant::now();
+    let policy_ok = crate::features::verify::test_signature_metadata_policy();
+    let elapsed = (Instant::now() - started).as_millis() as u32;
+    if !policy_ok {
         log!("   CRITICAL: Firmware signature metadata policy failed.");
+        boot_display.set_security_test_state(5, 3, elapsed).ok();
+        boot_display.show_panic_screen("POLICY TEST FAILED").ok();
         loop {
             core::hint::spin_loop();
         }
     }
-
+    boot_display.set_security_test_state(5, 2, elapsed).ok();
     log!();
 
     // ═══════════════════════════════════════════════════════════════

@@ -28,9 +28,9 @@
 //   - Compatible with official BIP39 test vectors
 
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256, Sha512};
 use super::bip39_wordlist::WORDLIST;
-use super::hmac::{hmac_sha512, zeroize_buf};
+use super::hmac::zeroize_buf;
 
 // ─── Errores ──────────────────────────────────────────────────────────
 
@@ -423,6 +423,51 @@ fn pbkdf2_hmac_sha512(password: &[u8], salt: &[u8], iterations: u32) -> Seed {
     // For BIP39 we only need 64 bytes = one SHA512 block
     // So we only compute T1 (block_index = 1)
 
+    // The password stays unchanged for every PBKDF2 round. Build and hash the
+    // HMAC key pads once, then clone those hash states for each round. This is
+    // mathematically identical to rebuilding HMAC every time but avoids
+    // hashing the same 256 bytes 2,048 times.
+    const BLOCK_LEN: usize = 128;
+    let mut key_block = [0u8; BLOCK_LEN];
+    if password.len() > BLOCK_LEN {
+        let mut hasher = Sha512::new();
+        hasher.update(password);
+        let digest = hasher.finalize();
+        key_block[..64].copy_from_slice(&digest);
+    } else {
+        key_block[..password.len()].copy_from_slice(password);
+    }
+
+    let mut inner_pad = [0u8; BLOCK_LEN];
+    let mut outer_pad = [0u8; BLOCK_LEN];
+    for i in 0..BLOCK_LEN {
+        inner_pad[i] = key_block[i] ^ 0x36;
+        outer_pad[i] = key_block[i] ^ 0x5c;
+    }
+
+    let mut inner_base = Sha512::new();
+    inner_base.update(inner_pad);
+    let mut outer_base = Sha512::new();
+    outer_base.update(outer_pad);
+
+    zeroize_buf(&mut key_block);
+    zeroize_buf(&mut inner_pad);
+    zeroize_buf(&mut outer_pad);
+
+    let hmac_from_precomputed_state = |message: &[u8]| -> [u8; 64] {
+        let mut inner = inner_base.clone();
+        inner.update(message);
+        let inner_hash = inner.finalize();
+
+        let mut outer = outer_base.clone();
+        outer.update(inner_hash);
+        let outer_hash = outer.finalize();
+
+        let mut output = [0u8; 64];
+        output.copy_from_slice(&outer_hash);
+        output
+    };
+
     // U1 = HMAC(password, salt || BE32(1))
     let mut salt_with_index = [0u8; 260]; // 256 max salt + 4 bytes index
     salt_with_index[..salt.len()].copy_from_slice(salt);
@@ -430,13 +475,13 @@ fn pbkdf2_hmac_sha512(password: &[u8], salt: &[u8], iterations: u32) -> Seed {
     let idx_bytes = 1u32.to_be_bytes();
     salt_with_index[salt.len()..salt.len() + 4].copy_from_slice(&idx_bytes);
 
-    let mut u_prev = hmac_sha512(password, &salt_with_index[..salt.len() + 4]);
+    let mut u_prev = hmac_from_precomputed_state(&salt_with_index[..salt.len() + 4]);
     let mut result = [0u8; 64];
     result.copy_from_slice(&u_prev);
 
     // U2..Uc
     for _ in 1..iterations {
-        let u_next = hmac_sha512(password, &u_prev);
+        let u_next = hmac_from_precomputed_state(&u_prev);
         for j in 0..64 {
             result[j] ^= u_next[j];
         }
