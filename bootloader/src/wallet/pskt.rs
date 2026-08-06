@@ -1701,16 +1701,74 @@ pub fn test_signed_response_size() -> bool {
     }
 }
 
+#[cfg(any(test, feature = "verbose-boot"))]
+/// Prove that a standard signed transaction with `input_count` inputs fits
+/// the real 4 KiB response buffer used by AppData.
+pub fn test_standard_signed_input_count(input_count: usize) -> bool {
+    if input_count == 0 || input_count > MAX_INPUTS {
+        return false;
+    }
+
+    let mut tx = alloc::boxed::Box::new(Transaction::new());
+    tx.version = 0;
+    tx.num_inputs = input_count;
+    tx.num_outputs = 1;
+
+    for i in 0..input_count {
+        let input = &mut tx.inputs[i];
+        input.previous_outpoint.transaction_id = [i as u8; 32];
+        input.previous_outpoint.index = i as u32;
+        input.utxo_entry.amount = 100_000_000;
+        input.sequence = u64::MAX;
+        input.sig_op_count = 1;
+        input.utxo_entry.script_public_key.version = 0;
+        input.utxo_entry.script_public_key.script[0] = 0x20;
+        input.utxo_entry.script_public_key.script[1..33].fill(0x11);
+        input.utxo_entry.script_public_key.script[33] = 0xAC;
+        input.utxo_entry.script_public_key.script_len = 34;
+        input.signature = [0x22; 64];
+        input.sig_len = 64;
+        input.sighash_type = SigHashType::All as u8;
+    }
+
+    tx.outputs[0].value = (input_count as u64) * 99_000_000;
+    tx.outputs[0].script_public_key.version = 0;
+    tx.outputs[0].script_public_key.script[0] = 0x20;
+    tx.outputs[0].script_public_key.script[1..33].fill(0x11);
+    tx.outputs[0].script_public_key.script[33] = 0xAC;
+    tx.outputs[0].script_public_key.script_len = 34;
+
+    let mut output = [0u8; 4096];
+    matches!(serialize_signed_pskt(&tx, &mut output), Ok(n) if n > 0 && n <= output.len())
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+/// Prove that an incoming ninth input is rejected explicitly by the parser.
+pub fn test_nine_inputs_rejected() -> bool {
+    let mut encoded = [0u8; 10];
+    encoded[..4].copy_from_slice(&PSKT_MAGIC);
+    encoded[4] = FORMAT_VERSION;
+    encoded[8] = (MAX_INPUTS + 1) as u8;
+    encoded[9] = 1;
+
+    let mut tx = alloc::boxed::Box::new(Transaction::new());
+    parse_pskt(&encoded, &mut tx) == Err(PsktError::TooManyInputs)
+}
+
 /// Run all KSPT tests
 #[cfg(any(test, feature = "verbose-boot"))]
 pub fn run_pskt_tests() -> (u32, u32) {
     let mut passed = 0u32;
-    let total = 4u32;
+    let total = 8u32;
 
     if test_serialize_parse_roundtrip() { passed += 1; }
     if test_invalid_magic() { passed += 1; }
     if test_full_sign_flow() { passed += 1; }
     if test_signed_response_size() { passed += 1; }
+    if test_standard_signed_input_count(6) { passed += 1; }
+    if test_standard_signed_input_count(7) { passed += 1; }
+    if test_standard_signed_input_count(8) { passed += 1; }
+    if test_nine_inputs_rejected() { passed += 1; }
 
     (passed, total)
 }

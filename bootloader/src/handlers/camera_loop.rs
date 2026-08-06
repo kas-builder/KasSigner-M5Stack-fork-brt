@@ -58,9 +58,9 @@ static mut QR_FINDERS_BEEPED: bool = false;
 static mut QR_ERROR_SHOWING: bool = false;
 static mut QR_GUIDE_VER: u8 = 0;
 static mut QR_VER_SAME_CNT: u8 = 0;
-// Multi-frame receive buffers. Increased from 20 to 40 frames (v1.0.3-wip)
-// to handle signed PSKBs which run ~2,600 bytes after adding two signatures
-// and chunk to 26 frames at the device's default 106-byte-per-frame output.
+// Multi-frame receive buffers. The companion app converts standard PSKB
+// transactions to compact KSPT before QR encoding, so 40 frames retain ample
+// margin while keeping this allocation bounded.
 // Slot size stays at 256 (max frag_len is 255 due to u8 header field).
 const MF_MAX_FRAMES: usize = 40;
 const MF_SLOT_SIZE: usize = 256;
@@ -449,7 +449,7 @@ fn process_confirmed_qr(
         // See wallet/std_pskt.rs for the parser, and docs/pskt/
         // PSKT_WIRE_FORMAT.md for the envelope details.
         //
-        // Scratch: use signed_qr_buf as a 4 KB hex-decode destination.
+        // Scratch: use signed_qr_buf as a 4 KiB hex-decode destination.
         // Safe to clobber — any pending outgoing QR content is stale
         // by the time a new transaction is received.
         //

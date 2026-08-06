@@ -227,13 +227,10 @@ pub struct AppData {
     /// MultisigShowAddress), 0 = plain address picking (ShowAddress).
     pub ms_picking_key: u8,
     /// Buffer for pending signed-tx QR payload (KSPT or PSKB).
-    /// Sized for the PSKB wire format of a fully-signed 2-of-3 multisig
-    /// (measured ~3.5 KB max; 4096 B gives headroom). KSPT payloads sit
-    /// well under 1 KB and use the same buffer.
-    /// Buffer for the outgoing signed KSPT/PSKT response.
-    /// Sized at 4 KB: realistic PSKBs are ~2-3 KB after signing
-    /// (measured: unsigned 2,106B → fully-signed 2-of-3 ~2,660B).
-    /// 4 KB leaves headroom for larger txs and 4-of-N multisig variants.
+    /// Buffer for incoming transaction decode scratch and the outgoing signed
+    /// KSPT/PSKT response. The companion app relays standard PSKB transactions
+    /// as compact KSPT, and serialization fails explicitly if this bound is
+    /// ever exceeded.
     /// Lives inside Box<AppData> so it doesn't hit the stack.
     pub signed_qr_buf: [u8; 4096],
     pub signed_qr_len: usize,

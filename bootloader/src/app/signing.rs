@@ -280,7 +280,7 @@ pub fn sign_and_serialize_multisig(
 // lives in `ad.signed_qr_buf` from parse time, and `serialize_pskt`
 // needs to read that same buffer to splice any captured unknown
 // regions while writing the outgoing PSKB wire. So we use a
-// stack-local 4 KB buffer for the output and copy back at the end.
+// heap-backed 4 KiB buffer for the output and copy back at the end.
 //
 // `format` is `TxInputFormat::PsktPskb` or `TxInputFormat::PsktSingle`
 // — the serializer chooses the magic prefix accordingly.
@@ -302,7 +302,7 @@ pub fn sign_and_serialize_pskt_multi(
         return 0;
     }
     wallet::std_pskt::move_ksp_sigs_to_pskt(tx);
-    // PSRAM-heap scratch — keeps this 4 KB off the stack so it doesn't
+    // PSRAM-heap scratch — keeps this 4 KiB off the stack so it doesn't
     // bloat main's frame via cross-function allocation hoisting.
     // Dropped at end of function; cost is only during signing.
     let mut tmp: alloc::vec::Vec<u8> = alloc::vec![0u8; 4096];
@@ -550,23 +550,6 @@ pub fn handle_signing_step(
                 ad.app.go_main_menu();
                 ad.needs_redraw = true;
             } else {
-                // Pre-check: will the signed TX fit in the 1024-byte output buffer?
-                // Header=48, per input=156, per output=45
-                let estimated_size = 48
-                    + (ad.demo_tx.num_inputs * 156)
-                    + (ad.demo_tx.num_outputs * 45);
-                if estimated_size > 1024 {
-                    log!("   ✗ TX too large: {} inputs × 156 + {} outputs × 45 = ~{} bytes (max 1024)",
-                        ad.demo_tx.num_inputs, ad.demo_tx.num_outputs, estimated_size);
-                    boot_display.draw_tx_error_screen(
-                        "Too many inputs!",
-                        "Consolidate UTXOs first");
-                    sound::beep_error(delay);
-                    ad.app.state = crate::app::input::AppState::Rejected;
-                    ad.needs_redraw = false; // already drawn
-                    return;
-                }
-
                 // Ensure pubkeys are cached (for display after signing)
                 if !ad.pubkeys_cached {
                     boot_display.draw_saving_screen("Deriving addresses...");
@@ -620,8 +603,8 @@ pub fn handle_signing_step(
                                 // Scratch: we need both &ad.signed_qr_buf (read)
                                 // AND &mut ad.signed_qr_buf (write). Work around
                                 // by copying the scratch into a stack-local
-                                // slice first; this costs another 4 KB of
-                                // stack on the signing path. Only needed
+                                // slice first; the serializer output uses
+                                // PSRAM-backed scratch on the signing path. Only needed
                                 // when pskt_parsed.unknowns_count > 0 — for
                                 // canonical vectors that's 0 and scratch
                                 // can be an empty slice.
@@ -701,6 +684,16 @@ pub fn handle_signing_step(
                         }
                     }
                     log!("   Signed response: {} bytes", ad.signed_qr_len);
+                    if ad.signed_qr_len == 0 {
+                        log!("   ✗ Signing or response serialization failed; refusing empty QR");
+                        boot_display.draw_tx_error_screen(
+                            "Signing failed",
+                            "Transaction was not exported");
+                        sound::beep_error(delay);
+                        ad.app.state = crate::app::input::AppState::Rejected;
+                        ad.needs_redraw = false;
+                        return;
+                    }
                     // Hex dump for companion app testing — single line for easy copy.
                     // PSRAM-backed Vec instead of a stack array so this can hold
                     // full PSKB hex (5-8 KB) without bloating main's stack frame.

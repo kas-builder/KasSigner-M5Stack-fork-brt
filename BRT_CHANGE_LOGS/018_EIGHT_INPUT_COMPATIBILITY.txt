@@ -1,0 +1,30 @@
+KASSIGNER COMPATIBILITY CHANGE RECORD 018
+
+Branch:
+integration/kassigner-m5stack-fork-brt
+
+Summary:
+Removed the obsolete 1024-byte signed-response estimate that rejected normal
+transactions around six to eight inputs even though the real response buffer is
+4096 bytes.
+
+Behavior:
+The signing path now attempts real serialization into the bounded 4096-byte
+buffer. A zero-length or failed result is rejected explicitly and is never
+exported as an empty QR response.
+
+Tests:
+Added standard signed-transaction serialization checks for 6, 7, and 8 inputs.
+Added an explicit parser check proving that a ninth input is rejected because
+the firmware transaction model supports at most eight.
+
+Companion-app assumption:
+The KasSigner iOS companion converts standard PSKB transactions to compact KSPT
+before QR transport. The existing 40-frame receive allocation remains bounded.
+
+Verification completed:
+M5Stack release compilation passed.
+Waveshare release compilation passed.
+Verbose M5Stack diagnostic compilation passed.
+Physical eight-input signing was previously tested successfully with the
+KasSigner iOS companion application.
