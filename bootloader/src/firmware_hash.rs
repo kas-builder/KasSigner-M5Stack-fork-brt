@@ -2,12 +2,12 @@
 //
 // Code segment hash + developer signature
 // IRAM 0x42050020, DRAM 0x3C050020
-// Segment size: 530024 bytes
+// Segment size: 529896 bytes
 // Signed: false
 
 /// SHA256 hash of the code segment
 pub const EXPECTED_FIRMWARE_HASH: [u8; 32] = [
-    0x77, 0xda, 0x78, 0x77, 0x0c, 0x4b, 0xf9, 0xe3, 0xbd, 0x25, 0xf9, 0x1d, 0x30, 0x5e, 0xa8, 0x01, 0x5a, 0x7a, 0xc2, 0xaa, 0x99, 0xb3, 0x63, 0x4d, 0x97, 0xee, 0xf4, 0x3f, 0xc3, 0x74, 0xc9, 0xad
+    0x87, 0x6d, 0x97, 0xe7, 0x9c, 0xae, 0xc7, 0x2f, 0xf2, 0x1f, 0x64, 0xcc, 0x9a, 0xd4, 0x2d, 0x0b, 0x74, 0x29, 0x76, 0xfc, 0xab, 0xa0, 0x1b, 0xb2, 0x84, 0x44, 0x02, 0xf5, 0xde, 0xa0, 0x64, 0xe5
 ];
 
 /// Schnorr signature of EXPECTED_FIRMWARE_HASH (signed by developer key)
@@ -20,10 +20,10 @@ pub const FIRMWARE_SIGNATURE: [u8; 64] = [
 pub const FIRMWARE_SIGNED: bool = false;
 
 /// Exact code segment size (from ESP-IDF binary header)
-pub const FIRMWARE_SIZE: usize = 530024;
+pub const FIRMWARE_SIZE: usize = 529896;
 
 /// Code segment address on instruction bus (IRAM)
 pub const FIRMWARE_IADDR: u32 = 0x42050020;
 
 /// Hash in hex format (for reference)
-pub const FIRMWARE_HASH_HEX: &str = "77da78770c4bf9e3bd25f91d305ea8015a7ac2aa99b3634d97eef43fc374c9ad";
+pub const FIRMWARE_HASH_HEX: &str = "876d97e79caec72ff21f64cc9ad42d0b742976fcaba01bb2844402f5dea064e5";
