@@ -16,6 +16,10 @@ name = "gen-keypair"
 path = "gen_keypair.rs"
 
 [[bin]]
+name = "release-manifest"
+path = "release_manifest.rs"
+
+[[bin]]
 name = "kassigner-mirror"
 path = "mirror.rs"
 
@@ -31,5 +35,6 @@ path = "verify.rs"
 sha2 = "0.10"
 k256 = { version = "0.13", features = ["arithmetic", "ecdsa", "schnorr"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
 serialport = "4"
 minifb = "0.27"

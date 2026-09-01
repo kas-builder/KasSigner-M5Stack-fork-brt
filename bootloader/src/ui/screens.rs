@@ -1271,33 +1271,26 @@ pub fn draw_home_grid(&mut self) {
         Image::new(&raw_img, Point::new(0, -20))
             .draw(&mut self.display).ok();
 
-        // Version
-        let mut vbuf = [0u8; 12];
-        let vlen = crate::features::fw_update::format_version(
-            crate::features::fw_update::CURRENT_VERSION, &mut vbuf[1..]);
-        vbuf[0] = b'v';
-        let vtxt = core::str::from_utf8(&vbuf[..vlen + 1]).unwrap_or("v?");
-        let vw = measure_title(vtxt);
-        draw_lato_title(&mut self.display, vtxt, (320 - vw) / 2, 122, COLOR_TEXT);
+        // Product and independent M5 firmware version.
+        let product = "KasSigner M5";
+        draw_lato_title(&mut self.display, product, (320 - measure_title(product)) / 2, 116, COLOR_TEXT);
+        let version = crate::version::DISPLAY_LABEL;
+        draw_lato_body(&mut self.display, version, (320 - measure_body(version)) / 2, 140, KASPA_TEAL);
 
         // Tagline
-        let s1 = "Secure Hardware Wallet for Kaspa";
-        draw_lato_body(&mut self.display, s1, (320 - measure_body(s1)) / 2, 146, COLOR_TEXT_DIM);
+        let s1 = "Air-Gapped Kaspa Signer";
+        draw_lato_body(&mut self.display, s1, (320 - measure_body(s1)) / 2, 164, COLOR_TEXT_DIM);
 
         // Tech line
-        let s2 = "100% Rust | Air-Gapped | no_std";
-        draw_lato_body(&mut self.display, s2, (320 - measure_body(s2)) / 2, 166, COLOR_TEXT_DIM);
+        let s2 = "Rust | CoreS3 | Signed Firmware";
+        draw_lato_body(&mut self.display, s2, (320 - measure_body(s2)) / 2, 184, COLOR_TEXT_DIM);
 
         // Board name
         #[cfg(feature = "waveshare")]
         let s3 = "Waveshare ESP32-S3-Touch-LCD-2";
         #[cfg(feature = "m5stack")]
-        let s3 = "M5Stack CoreS3 Lite";
-        draw_lato_hint(&mut self.display, s3, (320 - measure_hint(s3)) / 2, 186, COLOR_TEXT_DIM);
-
-        // kaspa.org
-        let s4 = "kaspa.org";
-        draw_lato_hint(&mut self.display, s4, (320 - measure_hint(s4)) / 2, 206, KASPA_TEAL);
+        let s3 = "M5Stack CoreS3";
+        draw_lato_hint(&mut self.display, s3, (320 - measure_hint(s3)) / 2, 206, COLOR_TEXT_DIM);
     }
 
     /// Draw seed info screen showing word count and address

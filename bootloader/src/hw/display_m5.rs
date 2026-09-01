@@ -573,10 +573,14 @@ impl<'a> BootDisplay<'a> {
     pub fn set_security_test_state(
         &mut self, index: usize, state: u8, elapsed_ms: u32,
     ) -> Result<(), &'static str> {
+        #[cfg(feature = "production")]
+        const FIRMWARE_LABEL: &str = "Firmware signature";
+        #[cfg(not(feature = "production"))]
+        const FIRMWARE_LABEL: &str = "Firmware hash only";
         const LABELS: [&str; 8] = [
-            "Hardware integrity", "Random generator", "Dice logic",
-            "Seed/passphrase", "Encrypted storage", "Firmware policy",
-            "Firmware integrity", "Transaction signing",
+            "Hardware", "Randomness", "Dice functions",
+            "Seed & passphrase", "Encrypted storage", "Signature policy",
+            FIRMWARE_LABEL, "Transaction signing",
         ];
         if index >= LABELS.len() || state > 4 {
             return Err("Invalid security test state");
@@ -585,7 +589,7 @@ impl<'a> BootDisplay<'a> {
         self.security_elapsed_ms[index] = elapsed_ms;
         self.display.clear(COLOR_BG).map_err(|_| "Clear failed")?;
 
-        let title = "Startup verification";
+        let title = "SECURITY CHECK";
         let tw = measure_header(title);
         draw_oswald_header(&mut self.display, title, (320 - tw) / 2, 25, KASPA_TEAL);
         draw_lato_hint(&mut self.display, crate::version::DISPLAY_LABEL, 18, 40, COLOR_TEXT_DIM);
@@ -600,18 +604,18 @@ impl<'a> BootDisplay<'a> {
                 4 => ("DEV", COLOR_ORANGE),
                 _ => ("--", COLOR_TEXT_DIM),
             };
-            draw_lato_hint(&mut self.display, status, 205, y, color);
+            draw_lato_hint(&mut self.display, status, 200, y, color);
             if self.security_status[i] >= 2 {
                 let mut timing = heapless::String::<20>::new();
                 use core::fmt::Write;
                 write!(&mut timing, "{} ms", self.security_elapsed_ms[i]).ok();
-                draw_lato_hint(&mut self.display, timing.as_str(), 252, y, COLOR_TEXT_DIM);
+                draw_lato_hint(&mut self.display, timing.as_str(), 244, y, COLOR_TEXT_DIM);
             }
         }
         if self.security_hash[0] != 0 {
             let hash = core::str::from_utf8(&self.security_hash).unwrap_or("hash unavailable");
-            draw_lato_hint(&mut self.display, "Hash", 18, 225, COLOR_TEXT_DIM);
-            draw_lato_hint(&mut self.display, hash, 62, 225, COLOR_TEXT_DIM);
+            draw_lato_hint(&mut self.display, "Firmware", 18, 225, COLOR_TEXT_DIM);
+            draw_lato_hint(&mut self.display, hash, 78, 225, COLOR_TEXT_DIM);
         }
         Ok(())
     }
@@ -687,25 +691,19 @@ impl<'a> BootDisplay<'a> {
         Image::new(&raw_img, Point::new(0, -20))
             .draw(&mut self.display).ok();
 
-        let mut vbuf = [0u8; 12];
-        let vlen = crate::features::fw_update::format_version(
-            crate::features::fw_update::CURRENT_VERSION, &mut vbuf[1..]);
-        vbuf[0] = b'v';
-        let vtxt = core::str::from_utf8(&vbuf[..vlen + 1]).unwrap_or("v?");
-        let vw = measure_title(vtxt);
-        draw_lato_title(&mut self.display, vtxt, (320 - vw) / 2, 122, COLOR_TEXT);
+        let product = "KasSigner M5";
+        draw_lato_title(&mut self.display, product, (320 - measure_title(product)) / 2, 116, COLOR_TEXT);
+        let version = crate::version::DISPLAY_LABEL;
+        draw_lato_body(&mut self.display, version, (320 - measure_body(version)) / 2, 140, KASPA_TEAL);
 
-        let s1 = "Secure Hardware Wallet for Kaspa";
-        draw_lato_body(&mut self.display, s1, (320 - measure_body(s1)) / 2, 146, COLOR_TEXT_DIM);
+        let s1 = "Air-Gapped Kaspa Signer";
+        draw_lato_body(&mut self.display, s1, (320 - measure_body(s1)) / 2, 164, COLOR_TEXT_DIM);
 
-        let s2 = "100% Rust | Air-Gapped | no_std";
-        draw_lato_body(&mut self.display, s2, (320 - measure_body(s2)) / 2, 166, COLOR_TEXT_DIM);
+        let s2 = "Rust | CoreS3 | Signed Firmware";
+        draw_lato_body(&mut self.display, s2, (320 - measure_body(s2)) / 2, 184, COLOR_TEXT_DIM);
 
-        let s3 = "M5Stack CoreS3 Lite";
-        draw_lato_hint(&mut self.display, s3, (320 - measure_hint(s3)) / 2, 186, COLOR_TEXT_DIM);
-
-        let s4 = "kaspa.org";
-        draw_lato_hint(&mut self.display, s4, (320 - measure_hint(s4)) / 2, 206, KASPA_TEAL);
+        let s3 = "M5Stack CoreS3";
+        draw_lato_hint(&mut self.display, s3, (320 - measure_hint(s3)) / 2, 206, COLOR_TEXT_DIM);
 
         Ok(())
     }

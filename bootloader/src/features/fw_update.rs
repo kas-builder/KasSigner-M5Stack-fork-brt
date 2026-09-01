@@ -41,11 +41,30 @@ use sha2::{Sha256, Digest};
 /// Magic bytes for firmware update QR: "KSFU" (KasSigner Firmware Update)
 pub const UPDATE_MAGIC: [u8; 4] = [0x4B, 0x53, 0x46, 0x55];
 
-/// Developer public key (x-only Schnorr, 32 bytes)
-/// Developer public key for firmware signature verification
-pub const DEV_PUBKEY: [u8; 32] = [
-    0xf5, 0x7f, 0x09, 0xaf, 0xf8, 0xd0, 0x6b, 0x3f, 0x24, 0xc8, 0xb3, 0xf9, 0xc0, 0xc9, 0x91, 0xca, 0x6b, 0x43, 0xe9, 0xa6, 0x8e, 0xf8, 0xbe, 0x3a, 0x91, 0x7b, 0x62, 0x88, 0x30, 0x80, 0xf7, 0xf3
-];
+const fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => panic!("release public key contains non-hex data"),
+    }
+}
+
+const fn parse_release_pubkey(hex: &str) -> [u8; 32] {
+    let bytes = hex.as_bytes();
+    assert!(bytes.len() == 65 && bytes[64] == b'\n', "release public key must be 64 hex characters plus newline");
+    let mut key = [0u8; 32];
+    let mut index = 0;
+    while index < 32 {
+        key[index] = (hex_nibble(bytes[index * 2]) << 4) | hex_nibble(bytes[index * 2 + 1]);
+        index += 1;
+    }
+    key
+}
+
+/// Release verification identity. The private half must never enter this repository.
+pub const DEV_PUBKEY: [u8; 32] =
+    parse_release_pubkey(include_str!("../../../release/release_pubkey.hex"));
 
 /// Current firmware version, derived from `crate::version` (which itself
 /// reads from `CARGO_PKG_VERSION_*` — see `bootloader/src/version.rs`).

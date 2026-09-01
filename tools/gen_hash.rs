@@ -433,7 +433,7 @@ fn validate_signing_key(privkey: &[u8; 32]) -> Result<(), String> {
     let actual: [u8; 32] = signing_key.verifying_key().to_bytes().into();
     if actual != expected {
         return Err(
-            "Signing key does not match bootloader/src/features/fw_update.rs DEV_PUBKEY"
+            "Signing key does not match release/release_pubkey.hex"
                 .to_string(),
         );
     }
@@ -442,39 +442,25 @@ fn validate_signing_key(privkey: &[u8; 32]) -> Result<(), String> {
 
 fn read_firmware_public_key() -> Result<[u8; 32], String> {
     let source = [
-        "bootloader/src/features/fw_update.rs",
-        "../bootloader/src/features/fw_update.rs",
+        "release/release_pubkey.hex",
+        "../release/release_pubkey.hex",
     ]
     .iter()
     .find_map(|path| fs::read_to_string(path).ok())
-    .ok_or_else(|| "Cannot read bootloader/src/features/fw_update.rs".to_string())?;
-    let marker = "pub const DEV_PUBKEY";
-    let declaration = source
-        .split_once(marker)
-        .map(|(_, rest)| rest)
-        .ok_or_else(|| "Firmware DEV_PUBKEY declaration was not found".to_string())?;
-    let array = declaration
-        .split_once("];\n")
-        .map(|(value, _)| value)
-        .ok_or_else(|| "Firmware DEV_PUBKEY array is malformed".to_string())?;
-
-    let mut parsed = [0u8; 32];
-    let mut count = 0usize;
-    for token in array.split(|ch: char| !(ch.is_ascii_hexdigit() || ch == 'x')) {
-        if let Some(hex) = token.strip_prefix("0x") {
-            if hex.len() == 2 && count < parsed.len() {
-                parsed[count] = u8::from_str_radix(hex, 16)
-                    .map_err(|_| "Firmware DEV_PUBKEY contains invalid hex".to_string())?;
-                count += 1;
-            }
-        }
+    .ok_or_else(|| "Cannot read release/release_pubkey.hex".to_string())?;
+    let hex = source.trim();
+    if hex.len() != 64 {
+        return Err("Release public key must contain exactly 64 hex characters".to_string());
     }
 
-    if count != parsed.len() || parsed.iter().all(|byte| *byte == 0) {
-        return Err(format!(
-            "Firmware DEV_PUBKEY must contain exactly 32 nonzero configured bytes; found {}",
-            count
-        ));
+    let mut parsed = [0u8; 32];
+    for (index, byte) in parsed.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "Release public key contains invalid hex".to_string())?;
+    }
+
+    if parsed.iter().all(|byte| *byte == 0) {
+        return Err("Release public key must not be all zeros".to_string());
     }
     Ok(parsed)
 }

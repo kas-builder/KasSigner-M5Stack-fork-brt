@@ -674,14 +674,10 @@ fn main() -> ! {
         (i2c, boot_display, dvp_camera_opt, cam_dma_buf_opt, cam_status, _bb_card_type)
     };
 
-    // ─── Production hardware root-of-trust policy ────────────────
-    // This only reads eFuses. It never burns or changes them. Development
-    // builds report the state but remain usable on unprovisioned test units.
-    if !hw::lockdown::hardware_security_policy_satisfied() {
-        log!("   [FATAL] Required production security eFuses are not enabled");
-        boot_display.show_panic_screen("EFUSE SECURITY OFF").ok();
-        halt_forever(&mut delay);
-    }
+    // ─── Optional ESP hardware hardening report ──────────────────
+    // This only reads eFuses; it never burns or changes them. Firmware
+    // authenticity is enforced below by mandatory production verification.
+    hw::lockdown::report_hardware_security_state();
 
     // Run potentially slow startup checks only after the display exists so
     // users see real progress instead of an unexplained black screen.

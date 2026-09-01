@@ -18,7 +18,7 @@ BIN="bootloader/target/xtensa-esp32s3-none-elf/release/kassigner-bootloader.bin"
 # Usage: build_with_hash.sh [development|production]
 #        [--board waveshare|m5stack] [--key path/to/signing_key.bin]
 MODE="development"
-BOARD="waveshare"
+BOARD=""
 SIGNING_KEY=""
 
 while [[ $# -gt 0 ]]; do
@@ -55,6 +55,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ -z "$BOARD" ]; then
+    echo "ERROR: --board is required; choose waveshare or m5stack explicitly" >&2
+    exit 2
+fi
+
 case "$BOARD" in
     waveshare)
         if [ "$MODE" = "production" ]; then
@@ -79,20 +84,6 @@ esac
 echo "  Mode: $MODE"
 echo "  Board: $BOARD"
 
-# Auto-detect a signing key only when --key was not supplied.
-if [ -z "$SIGNING_KEY" ]; then
-    for candidate in \
-        "dev_signing_key.bin" \
-        "keys/dev_signing_key.bin" \
-        "../dev_signing_key.bin" \
-        "$HOME/.kassigner/dev_signing_key.bin"; do
-        if [ -f "$candidate" ]; then
-            SIGNING_KEY="$candidate"
-            break
-        fi
-    done
-fi
-
 SIGN_ARG=""
 if [ -n "$SIGNING_KEY" ]; then
     if [ ! -f "$SIGNING_KEY" ]; then
@@ -110,6 +101,29 @@ fi
 if [ "$MODE" = "production" ] && [ -z "$SIGN_ARG" ]; then
     echo "ERROR: Production builds require a valid 32-byte signing key" >&2
     exit 1
+fi
+
+if [ "$MODE" = "development" ] && [ -n "$SIGN_ARG" ]; then
+    echo "ERROR: --key is accepted only for production builds" >&2
+    exit 2
+fi
+
+if [ "$MODE" = "production" ]; then
+    cargo run --quiet --manifest-path tools/Cargo.toml --bin release-manifest -- \
+        check-key "$SIGN_ARG"
+
+    COMMIT="$(git rev-parse --verify HEAD)"
+    if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+        if [ "${KASSIGNER_ALLOW_DIRTY_BUILD:-0}" != "1" ]; then
+            echo "ERROR: Production builds require a clean Git tree" >&2
+            echo "For a local test build only, set KASSIGNER_ALLOW_DIRTY_BUILD=1" >&2
+            exit 1
+        fi
+        COMMIT="${COMMIT}-dirty"
+        echo "  Source: DIRTY local test build (not releasable)"
+    else
+        echo "  Source: clean commit $COMMIT"
+    fi
 fi
 
 if [ -n "$SIGN_ARG" ]; then
@@ -211,7 +225,34 @@ elif [ -n "$SIGN_ARG" ]; then
 else
     echo "  Status: UNSIGNED (development)"
 fi
+
+if [ "$MODE" = "production" ]; then
+    RELEASE_DIR="dist"
+    RELEASE_ARTIFACT="$RELEASE_DIR/kassigner-m5stack.bin"
+    RELEASE_MANIFEST="$RELEASE_DIR/kassigner-m5stack.manifest"
+    RELEASE_SIGNATURE="$RELEASE_DIR/kassigner-m5stack.manifest.sig"
+    VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' bootloader/Cargo.toml | head -1)"
+    [ -n "$VERSION" ] || { echo "ERROR: Could not determine bootloader version" >&2; exit 1; }
+    mkdir -p "$RELEASE_DIR"
+    # The convergence hash is computed from the application image above, but a
+    # release artifact must contain the bootloader, partition table, and app.
+    # --skip-padding avoids shipping a 16 MiB file while --flash-size records
+    # the actual CoreS3 flash geometry in the image metadata.
+    espflash save-image --chip esp32s3 --merge --skip-padding --flash-size 16mb \
+        "$ELF" "$RELEASE_ARTIFACT"
+    cargo run --quiet --manifest-path tools/Cargo.toml --bin release-manifest -- create \
+        "$RELEASE_ARTIFACT" "$RELEASE_MANIFEST" "$RELEASE_SIGNATURE" \
+        "$SIGN_ARG" "$COMMIT" "$VERSION"
+    cargo run --quiet --manifest-path tools/Cargo.toml --bin release-manifest -- verify \
+        "$RELEASE_ARTIFACT" "$RELEASE_MANIFEST" "$RELEASE_SIGNATURE" \
+        release/release_pubkey.hex
+    echo "  Release: $RELEASE_DIR (artifact + signed manifest)"
+fi
 echo ""
-echo "  To flash:"
-echo "    cd bootloader"
-echo "    espflash flash --monitor $ELF"
+if [ "$MODE" = "production" ]; then
+    echo "  To install the authenticated release:"
+    echo "    ./Install.sh dist"
+else
+    echo "  Development flash (not a release):"
+    echo "    espflash flash --monitor $ELF"
+fi

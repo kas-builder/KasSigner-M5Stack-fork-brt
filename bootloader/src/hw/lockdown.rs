@@ -19,7 +19,7 @@
 //
 // KasSigner is air-gapped. WiFi, Bluetooth, USB OTG, and JTAG have
 // no legitimate use. This module shuts down unused peripherals and
-// verifies the permanent hardware security state in production builds.
+// reports the permanent hardware security state in every build.
 //
 // Two phases:
 //   early_lockdown()  — called immediately after esp_hal::init(),
@@ -29,8 +29,9 @@
 //
 // Software register writes are defense in depth, not a hardware root of
 // trust. Permanent Secure Boot, flash encryption, and JTAG disablement are
-// read from eFuses and are required by production firmware. This module
-// never burns eFuses.
+// read from eFuses and reported as optional hardware hardening. They are not
+// treated as enabled unless the release pipeline actually provisions an ESP
+// hardware root of trust. This module never burns eFuses.
 
 use crate::log;
 use esp_hal::efuse::{
@@ -65,10 +66,11 @@ pub fn hardware_security_state() -> HardwareSecurityState {
     }
 }
 
-/// Production builds fail closed unless the hardware root of trust is fully
-/// provisioned. Development builds log the same state without preventing
-/// testing on an unprovisioned board.
-pub fn hardware_security_policy_satisfied() -> bool {
+/// Report optional permanent hardware hardening. Firmware authenticity is
+/// enforced separately by the mandatory production Schnorr verification;
+/// these eFuses must not become a boot requirement until the release pipeline
+/// can generate ESP Secure Boot-compatible images and provision devices safely.
+pub fn report_hardware_security_state() {
     let state = hardware_security_state();
     log!(
         "   [SEC] eFuses: secure_boot={} flash_encryption={} pad_jtag_off={} usb_jtag_off={}",
@@ -78,17 +80,8 @@ pub fn hardware_security_policy_satisfied() -> bool {
         state.usb_jtag_disabled
     );
 
-    #[cfg(feature = "production")]
-    {
-        state.production_ready()
-    }
-
-    #[cfg(not(feature = "production"))]
-    {
-        if !state.production_ready() {
-            log!("   [WARN] Development device is not hardware-provisioned");
-        }
-        true
+    if !state.production_ready() {
+        log!("   [WARN] Optional ESP hardware hardening is not fully provisioned");
     }
 }
 
@@ -189,8 +182,8 @@ pub fn early_lockdown() {
 /// In dev mode (not production), USB Serial is kept alive for UART
 /// monitoring. In production, everything is killed.
 ///
-/// Permanent JTAG disablement is enforced by the production eFuse policy
-/// above. Register writes here must not be described as equivalent to that.
+/// Permanent JTAG disablement is reported above. Register writes here must
+/// not be described as equivalent to permanent eFuse provisioning.
 pub fn post_boot_lockdown() {
     unsafe {
         // ── Reduce USB/JTAG pin surface ──

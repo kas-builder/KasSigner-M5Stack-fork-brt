@@ -23,6 +23,7 @@ keys/*.bin
 *.bin
 *.elf
 *.map
+dist/
 
 # Generated files (rebuilt by build system)
 bootloader/src/logo_data.rs

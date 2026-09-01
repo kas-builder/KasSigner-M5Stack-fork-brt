@@ -68,7 +68,5 @@ pub const NUMERIC: u32 =
 /// `&'static str` is expected. No allocation, zero runtime cost.
 pub const STRING: &str = env!("CARGO_PKG_VERSION");
 
-/// Human-readable label shown on this fork's opening verification screen.
-/// Keep the machine-readable Cargo version above unchanged so firmware-update
-/// ordering and rollback protection continue to use semantic version 1.0.4.
-pub const DISPLAY_LABEL: &str = "1.0-brt-fork";
+/// Human-readable product/version label shown in the device UI.
+pub const DISPLAY_LABEL: &str = "BRT Fork v2.0.0";
