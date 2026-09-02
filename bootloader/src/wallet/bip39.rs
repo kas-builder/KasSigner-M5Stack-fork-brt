@@ -193,6 +193,15 @@ pub fn index_to_word(index: u16) -> &'static str {
 /// The mnemonic is serialized as a string: space-separated words.
 /// The salt is "mnemonic" + passphrase (passphrase may be empty).
 pub fn seed_from_mnemonic_12(mnemonic: &Mnemonic12, passphrase: &str) -> Seed {
+    seed_from_mnemonic_12_progress(mnemonic, passphrase, &mut |_, _| {})
+}
+
+/// Derive a 512-bit seed while reporting completed PBKDF2 rounds.
+pub fn seed_from_mnemonic_12_progress(
+    mnemonic: &Mnemonic12,
+    passphrase: &str,
+    progress: &mut dyn FnMut(u32, u32),
+) -> Seed {
     // Build the mnemonic phrase as a string (in a stack buffer)
     // 24 words * max 8 chars + 23 spaces = ~215 bytes max for 24 words
     // For 12 words: ~107 bytes max
@@ -203,10 +212,11 @@ pub fn seed_from_mnemonic_12(mnemonic: &Mnemonic12, passphrase: &str) -> Seed {
     let mut salt_buf = [0u8; 256];
     let salt_len = build_salt(passphrase, &mut salt_buf);
 
-    let seed = pbkdf2_hmac_sha512(
+    let seed = pbkdf2_hmac_sha512_progress(
         &phrase_buf[..phrase_len],
         &salt_buf[..salt_len],
         2048,
+        progress,
     );
 
     // Zeroize temporary buffers
@@ -218,16 +228,26 @@ pub fn seed_from_mnemonic_12(mnemonic: &Mnemonic12, passphrase: &str) -> Seed {
 
 /// Derive a 512-bit seed from a 24-word mnemonic + passphrase.
 pub fn seed_from_mnemonic_24(mnemonic: &Mnemonic24, passphrase: &str) -> Seed {
+    seed_from_mnemonic_24_progress(mnemonic, passphrase, &mut |_, _| {})
+}
+
+/// Derive a 512-bit seed while reporting completed PBKDF2 rounds.
+pub fn seed_from_mnemonic_24_progress(
+    mnemonic: &Mnemonic24,
+    passphrase: &str,
+    progress: &mut dyn FnMut(u32, u32),
+) -> Seed {
     let mut phrase_buf = [0u8; 512];
     let phrase_len = serialize_mnemonic_24(&mnemonic.indices, &mut phrase_buf);
 
     let mut salt_buf = [0u8; 256];
     let salt_len = build_salt(passphrase, &mut salt_buf);
 
-    let seed = pbkdf2_hmac_sha512(
+    let seed = pbkdf2_hmac_sha512_progress(
         &phrase_buf[..phrase_len],
         &salt_buf[..salt_len],
         2048,
+        progress,
     );
 
     zeroize_buf(&mut phrase_buf);
@@ -419,7 +439,13 @@ fn str_cmp(a: &str, b: &str) -> core::cmp::Ordering {
 /// Ti = U1 ⊕ U2 ⊕ ... ⊕ Uc
 /// U1 = HMAC(password, salt || INT(i))
 /// Uj = HMAC(password, U_{j-1})
-fn pbkdf2_hmac_sha512(password: &[u8], salt: &[u8], iterations: u32) -> Seed {
+/// PBKDF2-HMAC-SHA512 with progress tied to completed iterations.
+fn pbkdf2_hmac_sha512_progress(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    progress: &mut dyn FnMut(u32, u32),
+) -> Seed {
     // For BIP39 we only need 64 bytes = one SHA512 block
     // So we only compute T1 (block_index = 1)
 
@@ -480,12 +506,17 @@ fn pbkdf2_hmac_sha512(password: &[u8], salt: &[u8], iterations: u32) -> Seed {
     result.copy_from_slice(&u_prev);
 
     // U2..Uc
-    for _ in 1..iterations {
+    let progress_step = (iterations / 20).max(1);
+    for i in 1..iterations {
         let u_next = hmac_from_precomputed_state(&u_prev);
         for j in 0..64 {
             result[j] ^= u_next[j];
         }
         u_prev = u_next;
+        let completed = i + 1;
+        if completed % progress_step == 0 || completed == iterations {
+            progress(completed, iterations);
+        }
     }
 
     // Zeroize temporaries
@@ -591,7 +622,17 @@ pub fn test_vector_24_zeros() -> bool {
 pub fn test_seed_derivation_trezor() -> bool {
     let entropy = [0u8; 16];
     let mnemonic = mnemonic_from_entropy_12(&entropy);
-    let mut seed = seed_from_mnemonic_12(&mnemonic, "TREZOR");
+    let mut last_completed = 0u32;
+    let mut reported_total = 0u32;
+    let mut monotonic = true;
+    let mut progress = |completed: u32, total: u32| {
+        if completed <= last_completed || completed > total {
+            monotonic = false;
+        }
+        last_completed = completed;
+        reported_total = total;
+    };
+    let mut seed = seed_from_mnemonic_12_progress(&mnemonic, "TREZOR", &mut progress);
 
     let expected: [u8; 64] = [
         0xc5, 0x52, 0x57, 0xc3, 0x60, 0xc0, 0x7c, 0x72,
@@ -604,7 +645,10 @@ pub fn test_seed_derivation_trezor() -> bool {
         0x2f, 0x00, 0x16, 0x98, 0xe7, 0x46, 0x3b, 0x04,
     ];
 
-    let matches = seed.bytes == expected;
+    let matches = seed.bytes == expected
+        && monotonic
+        && last_completed == 2048
+        && reported_total == 2048;
     seed.zeroize();
     matches
 }

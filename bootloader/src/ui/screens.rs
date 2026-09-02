@@ -1004,7 +1004,7 @@ pub fn draw_home_grid(&mut self) {
         static ICON_SETTINGS: &[u8] = include_bytes!("../../assets/icon_about.raw");
 
         let icons: [&[u8]; 4] = [ICON_SCAN, ICON_SEEDS, ICON_TOOLS, ICON_SETTINGS];
-        let labels: [&str; 4] = ["Scan", "Seeds", "Tools", "Settings"];
+        let labels: [&str; 4] = ["Sign", "Seeds", "Tools", "Settings"];
         let positions: [(i32, i32); 4] = [
             (8, 46),    // top-left
             (164, 46),  // top-right

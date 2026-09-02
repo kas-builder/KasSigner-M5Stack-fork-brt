@@ -123,6 +123,35 @@ pub fn derive_seed(
     }
 }
 
+/// Derive a BIP39 seed while reporting completed PBKDF2 rounds.
+#[inline(never)]
+pub fn derive_seed_progress(
+    mnemonic_indices: &[u16; 24],
+    wc: u8,
+    passphrase: &str,
+    progress: &mut dyn FnMut(u32, u32),
+) -> wallet::bip39::Seed {
+    if wc == 12 {
+        let m12 = wallet::bip39::Mnemonic12 {
+            indices: {
+                let mut arr = [0u16; 12];
+                arr.copy_from_slice(&mnemonic_indices[..12]);
+                arr
+            }
+        };
+        wallet::bip39::seed_from_mnemonic_12_progress(&m12, passphrase, progress)
+    } else {
+        let m24 = wallet::bip39::Mnemonic24 {
+            indices: {
+                let mut arr = [0u16; 24];
+                arr.copy_from_slice(&mnemonic_indices[..24]);
+                arr
+            }
+        };
+        wallet::bip39::seed_from_mnemonic_24_progress(&m24, passphrase, progress)
+    }
+}
+
 /// Derive a single pubkey from the cached account key. Instant (no PBKDF2).
 /// Used for any index — works for both in-cache and out-of-cache addresses.
 #[inline(never)]
@@ -628,7 +657,13 @@ pub fn handle_signing_step(
                                     }
                                 } else {
                                     let pp = slot.passphrase_str();
-                                    let mut seed = derive_seed(&ad.mnemonic_indices, ad.word_count, pp);
+                                    let mut progress = |current: u32, total: u32| {
+                                        let pct = if total == 0 { 0 } else { current * 85 / total };
+                                        boot_display.update_progress_bar(pct as u8);
+                                    };
+                                    let mut seed = derive_seed_progress(
+                                        &ad.mnemonic_indices, ad.word_count, pp, &mut progress,
+                                    );
                                     ad.signed_qr_len = sign_and_serialize_pskt_multi(
                                         &mut ad.demo_tx, &seed.bytes,
                                         &ad.pskt_parsed,
@@ -636,6 +671,9 @@ pub fn handle_signing_step(
                                         format,
                                         &mut ad.signed_qr_buf,
                                     );
+                                    if ad.signed_qr_len > 0 {
+                                        boot_display.update_progress_bar(100);
+                                    }
                                     zeroize_seed(&mut seed.bytes);
                                     let (present, required) =
                                         wallet::std_pskt::pskt_signature_status(&ad.demo_tx);
@@ -677,8 +715,17 @@ pub fn handle_signing_step(
                                 ad.tx_sigs_present = 0;
                                 ad.tx_sigs_required = 0;
                                 let pp = slot.passphrase_str();
-                                let mut seed = derive_seed(&ad.mnemonic_indices, ad.word_count, pp);
+                                let mut progress = |current: u32, total: u32| {
+                                    let pct = if total == 0 { 0 } else { current * 85 / total };
+                                    boot_display.update_progress_bar(pct as u8);
+                                };
+                                let mut seed = derive_seed_progress(
+                                    &ad.mnemonic_indices, ad.word_count, pp, &mut progress,
+                                );
                                 ad.signed_qr_len = sign_and_serialize_multi(&mut ad.demo_tx, &seed.bytes, &mut ad.signed_qr_buf);
+                                if ad.signed_qr_len > 0 {
+                                    boot_display.update_progress_bar(100);
+                                }
                                 zeroize_seed(&mut seed.bytes);
                             }
                         }
