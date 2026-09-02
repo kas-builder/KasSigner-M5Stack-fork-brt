@@ -530,25 +530,23 @@ pub fn handle_sd_touch(
                                                         }
                                                     }
                                                 } else {
-                                                    // Multi-frame: split into chunks of 100 bytes max
-                                                    // Wire: [frame_idx:1][total:1][frag_len:1][payload]
-                                                    let max_frag: usize = 100;
+                                                    let max_frag = crate::qr::multiframe::MAX_FRAGMENT_LEN;
                                                     let n_frames = (len + max_frag - 1) / max_frag;
-                                                    let balanced = (len + n_frames - 1) / n_frames;
                                                     let mut frame: usize = 0;
                                                     let mut _tick: u32 = 0;
                                                     boot_display.clear_screen();
                                                     loop {
                                                         // Draw current frame
-                                                        let offset = frame * balanced;
-                                                        let remaining = len.saturating_sub(offset);
-                                                        let frag_len = remaining.min(balanced);
-                                                        let mut fb = [0u8; 134];
-                                                        fb[0] = frame as u8;
-                                                        fb[1] = n_frames as u8;
-                                                        fb[2] = frag_len as u8;
-                                                        fb[3..3 + frag_len].copy_from_slice(&ad.signed_qr_buf[offset..offset + frag_len]);
-                                                        let qr_len = 3 + frag_len.max(20);
+                                                        let mut fb = [0u8; 160];
+                                                        let qr_len = match crate::qr::multiframe::encode_frame(
+                                                            &ad.signed_qr_buf[..len],
+                                                            frame as u8,
+                                                            n_frames as u8,
+                                                            &mut fb,
+                                                        ) {
+                                                            Ok(encoded_len) => encoded_len,
+                                                            Err(_) => break,
+                                                        };
 
                                                         // Blink-free: draw white quiet-zone over old QR, then dark modules
                                                         if let Ok(qr) = crate::qr::encoder::encode(&fb[..qr_len]) {

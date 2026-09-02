@@ -290,7 +290,6 @@ pub fn redraw_screen(
                             }
                         }
                         let n_frames = ad.kpub_user_nframes as usize;
-                        let balanced = (raw_len + n_frames - 1) / n_frames;
                         // Show mode choice (auto/manual)
                         if ad.kpub_nframes == 0 {
                             ad.kpub_frame = 0;
@@ -299,17 +298,14 @@ pub fn redraw_screen(
                             boot_display.draw_qr_mode_choice();
                             return;
                         }
-                        // Build current frame: [frame_idx, total, frag_len, ...data]
                         let frame = ad.kpub_frame as usize;
-                        let offset = frame * balanced;
-                        let remaining = raw_len.saturating_sub(offset);
-                        let frag_len = remaining.min(balanced);
-                        let mut frame_buf = [0u8; 134];
-                        frame_buf[0] = frame as u8;
-                        frame_buf[1] = n_frames as u8;
-                        frame_buf[2] = frag_len as u8;
-                        frame_buf[3..3 + frag_len].copy_from_slice(&raw_buf[offset..offset + frag_len]);
-                        let qr_len = if frag_len < 20 { 3 + 20 } else { 3 + frag_len };
+                        let mut frame_buf = [0u8; 160];
+                        let qr_len = match crate::qr::multiframe::encode_frame(
+                            &raw_buf[..raw_len], frame as u8, n_frames as u8, &mut frame_buf,
+                        ) {
+                            Ok(len) => len,
+                            Err(_) => return,
+                        };
                         // Multi-frame: left-aligned layout + FRAMES counter.
                         // No SIGNER badge — kpub export isn't a multisig
                         // signing context.
@@ -510,11 +506,11 @@ pub fn redraw_screen(
                 }
                 crate::app::input::AppState::ShowQR => {
                     if ad.signed_qr_len > 0 {
-                        // max_payload = raw bytes/frame (not counting the 3-byte
-                        // [frame, total, frag_len] wire-header). Selected by
+                        // max_payload = raw bytes/frame (not counting the
+                        // authenticated v2 transport header). Selected by
                         // signed_qr_mode (v1.0.3+), falling back to legacy
                         // signed_qr_large flag when mode == 0.
-                        //   mode 0 → legacy: phone 106 / device 55
+                        //   mode 0 → phone 96 / device 55
                         //   mode 1 → 85 (V5, few scans but tight on LCD)
                         //   mode 2 → 55 (V4, balanced)
                         //   mode 3 → 40 (V3, reliable LCD)
@@ -524,7 +520,7 @@ pub fn redraw_screen(
                             2 => 55usize,
                             3 => 40usize,
                             4 => 27usize,
-                            _ => if ad.signed_qr_large { 55usize } else { 106usize },
+                            _ => if ad.signed_qr_large { 55usize } else { 96usize },
                         };
 
                         // Layout rules (unified v1.0.3 UX):
@@ -573,16 +569,16 @@ pub fn redraw_screen(
                             }
                             // Build current frame — balanced sizing
                             let frame = ad.signed_qr_frame as usize;
-                            let balanced = (ad.signed_qr_len + n_frames - 1) / n_frames;
-                            let offset = frame * balanced;
-                            let remaining = ad.signed_qr_len.saturating_sub(offset);
-                            let frag_len = remaining.min(balanced);
-                            let mut frame_buf = [0u8; 134];
-                            frame_buf[0] = frame as u8;
-                            frame_buf[1] = n_frames as u8;
-                            frame_buf[2] = frag_len as u8;
-                            frame_buf[3..3 + frag_len].copy_from_slice(&ad.signed_qr_buf[offset..offset + frag_len]);
-                            let qr_len = if frag_len < 20 { 3 + 20 } else { 3 + frag_len };
+                            let mut frame_buf = [0u8; 160];
+                            let qr_len = match crate::qr::multiframe::encode_frame(
+                                &ad.signed_qr_buf[..ad.signed_qr_len],
+                                frame as u8,
+                                n_frames as u8,
+                                &mut frame_buf,
+                            ) {
+                                Ok(len) => len,
+                                Err(_) => return,
+                            };
                             // Multi-frame: always left-aligned
                             // Clear screen on first frame (transition from mode choice)
                             if frame == 0 {

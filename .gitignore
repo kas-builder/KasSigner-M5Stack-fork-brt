@@ -18,6 +18,7 @@ dev_signing_key.bin
 keys/*.bin
 *.pem
 *.key
+.release-signing-key-path
 
 # ESP build artifacts
 *.bin

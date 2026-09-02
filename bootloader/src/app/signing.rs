@@ -814,18 +814,17 @@ pub fn cycle_signed_qr(
                 }
                 ad.signed_qr_frame = (ad.signed_qr_frame + 1) % ad.signed_qr_nframes;
                 let n_frames = ad.signed_qr_nframes as usize;
-                let balanced = (ad.signed_qr_len + n_frames - 1) / n_frames;
-                let offset = ad.signed_qr_frame as usize * balanced;
-                let remaining = ad.signed_qr_len.saturating_sub(offset);
-                let frag_len = remaining.min(balanced);
-                if frag_len > 0 {
-                    let mut frame_buf = [0u8; 134];
-                    frame_buf[0] = ad.signed_qr_frame;
-                    frame_buf[1] = ad.signed_qr_nframes;
-                    frame_buf[2] = frag_len as u8;
-                    frame_buf[3..3 + frag_len]
-                        .copy_from_slice(&ad.signed_qr_buf[offset..offset + frag_len]);
-                    let qr_len = if frag_len < 20 { 3 + 20 } else { 3 + frag_len };
+                if n_frames > 1 {
+                    let mut frame_buf = [0u8; 160];
+                    let qr_len = match crate::qr::multiframe::encode_frame(
+                        &ad.signed_qr_buf[..ad.signed_qr_len],
+                        ad.signed_qr_frame,
+                        ad.signed_qr_nframes,
+                        &mut frame_buf,
+                    ) {
+                        Ok(len) => len,
+                        Err(_) => return,
+                    };
                     // Match unified redraw.rs ShowQR logic (v1.0.3):
                     // multi-frame QRs always use the left-aligned layout
                     // so the right info column stays available for the

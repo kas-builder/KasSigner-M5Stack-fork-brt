@@ -61,7 +61,7 @@ static mut QR_VER_SAME_CNT: u8 = 0;
 // Multi-frame receive buffers. The companion app converts standard PSKB
 // transactions to compact KSPT before QR encoding, so 40 frames retain ample
 // margin while keeping this allocation bounded.
-// Slot size stays at 256 (max frag_len is 255 due to u8 header field).
+// Fixed slots isolate fragments while the v2 decoder caps each at 96 bytes.
 const MF_MAX_FRAMES: usize = 40;
 const MF_SLOT_SIZE: usize = 256;
 const MF_BUF_SIZE: usize = MF_MAX_FRAMES * MF_SLOT_SIZE; // 10,240 bytes
@@ -71,6 +71,12 @@ static mut MF_RECEIVED: [bool; MF_MAX_FRAMES] = [false; MF_MAX_FRAMES];
 static mut MF_FRAG_SIZE: [u16; MF_MAX_FRAMES] = [0; MF_MAX_FRAMES];
 static mut MF_TOTAL: u8 = 0;
 static mut MF_LEN: usize = 0;
+static mut MF_KIND: u8 = 0;
+static mut MF_SESSION: [u8; crate::qr::multiframe::SESSION_LEN] =
+    [0; crate::qr::multiframe::SESSION_LEN];
+static mut MF_PAYLOAD_LEN: u16 = 0;
+static mut MF_DIGEST: [u8; crate::qr::multiframe::DIGEST_LEN] =
+    [0; crate::qr::multiframe::DIGEST_LEN];
 
 // Waveshare-only: flash detection and voting confirmation
 #[cfg(feature = "waveshare")]
@@ -691,11 +697,10 @@ fn process_confirmed_qr(
             boot_display.update_progress_bar(100);
 
             // Display result. response_len <= 134 (count <= 2): one static QR,
-            // returns on next touch as before. Larger: chunk into
-            // [idx][total][frag_len][payload] frames (the wire format KasSee
-            // accumulates) and auto-cycle a few passes. process_confirmed_qr has
-            // no i2c here, so there is no touch-to-exit yet; KasSee collects every
-            // frame across the passes.
+            // returns on next touch as before. Larger responses use the
+            // authenticated v2 multi-frame transport shared with KasSigner iOS.
+            // process_confirmed_qr has no i2c here, so there is no touch-to-exit
+            // yet; KasSee collects every frame across the passes.
             let response_len = 5 + count * 64;
             if response_len <= 134 {
                 boot_display.draw_qr_fullscreen(&response[..response_len], "STEALTH SCAN");
@@ -707,9 +712,8 @@ fn process_confirmed_qr(
                 // branch stops it via draw_qr_fullscreen, but draw_qr_screen_left
                 // does not, so without this it beeps through the whole cycle.
                 sound::stop_ticking();
-                let max_frag: usize = 100;
+                let max_frag = crate::qr::multiframe::MAX_FRAGMENT_LEN;
                 let n_frames = (response_len + max_frag - 1) / max_frag;
-                let balanced = (response_len + n_frames - 1) / n_frames;
                 boot_display.clear_screen();
                 // Cycle the frames indefinitely so KasSee can capture every one;
                 // leave only when the user taps the screen. A single stop_ticking()
@@ -720,15 +724,13 @@ fn process_confirmed_qr(
                 let mut frame = 0usize;
                 let mut touch_armed = false;
                 'stlr_show: loop {
-                    let offset = frame * balanced;
-                    let remaining = response_len.saturating_sub(offset);
-                    let frag_len = remaining.min(balanced);
-                    let mut fb = [0u8; 134];
-                    fb[0] = frame as u8;
-                    fb[1] = n_frames as u8;
-                    fb[2] = frag_len as u8;
-                    fb[3..3 + frag_len].copy_from_slice(&response[offset..offset + frag_len]);
-                    let qr_len = if frag_len < 20 { 3 + 20 } else { 3 + frag_len };
+                    let mut fb = [0u8; 160];
+                    let qr_len = match crate::qr::multiframe::encode_frame(
+                        &response[..response_len], frame as u8, n_frames as u8, &mut fb,
+                    ) {
+                        Ok(len) => len,
+                        Err(_) => break 'stlr_show,
+                    };
                     boot_display.draw_qr_screen_left(&fb[..qr_len]);
                     // Hold ~400ms per frame, polling touch every 20ms.
                     let mut held = 0u32;
@@ -878,25 +880,55 @@ fn process_multiframe(
     i2c: &mut esp_hal::i2c::master::I2c<'_, esp_hal::Blocking>,
 ) {
     unsafe {
-        let frame_num = d[0] as usize;
-        let total = d[1];
-        let frag_len = d[2] as usize;
+        let frame = match crate::qr::multiframe::decode_frame(&d[..len]) {
+            Ok(frame) => frame,
+            Err(_) => return,
+        };
+        let frame_num = frame.index as usize;
+        let total = frame.total;
+        let frag_len = frame.fragment.len();
 
-        if frag_len + 3 > len { return; }
+        if total as usize > MF_MAX_FRAMES
+            || frame.payload_len as usize > MF_BUF_SIZE
+        {
+            return;
+        }
 
-        if MF_TOTAL == 0 || MF_TOTAL != total {
+        if MF_TOTAL == 0 {
             MF_TOTAL = total;
+            MF_KIND = frame.kind;
+            MF_SESSION = frame.session;
+            MF_PAYLOAD_LEN = frame.payload_len;
+            MF_DIGEST = frame.digest;
             MF_LEN = 0;
             for i in 0..MF_MAX_FRAMES { MF_RECEIVED[i] = false; }
             for i in 0..MF_MAX_FRAMES { MF_FRAG_SIZE[i] = 0; }
+        } else if MF_TOTAL != total
+            || MF_KIND != frame.kind
+            || MF_SESSION != frame.session
+            || MF_PAYLOAD_LEN != frame.payload_len
+            || MF_DIGEST != frame.digest
+        {
+            log!("   → Rejected frame from a different QR transfer");
+            return;
         }
 
-        if !MF_RECEIVED[frame_num] {
+        if MF_RECEIVED[frame_num] {
+            let slot_offset = frame_num * MF_SLOT_SIZE;
+            let stored_len = MF_FRAG_SIZE[frame_num] as usize;
+            if stored_len != frag_len
+                || &MF_BUF[slot_offset..slot_offset + stored_len] != frame.fragment
+            {
+                log!("   → Rejected conflicting duplicate QR frame");
+                MF_TOTAL = 0;
+            }
+            return;
+        } else {
             let slot_offset = frame_num * MF_SLOT_SIZE;
             let end = slot_offset + frag_len;
             if end <= MF_BUF_SIZE {
                 MF_BUF[slot_offset..end]
-                    .copy_from_slice(&d[3..3 + frag_len]);
+                    .copy_from_slice(frame.fragment);
                 MF_FRAG_SIZE[frame_num] = frag_len as u16;
                 MF_RECEIVED[frame_num] = true;
             } else {
@@ -939,6 +971,18 @@ fn process_multiframe(
                 }
                 log!("   → All {} frames, {} bytes", total, pos);
                 MF_TOTAL = 0;
+                if pos != MF_PAYLOAD_LEN as usize {
+                    log!("   → Rejected QR payload length mismatch");
+                    return;
+                }
+                if !crate::qr::multiframe::verify_payload(
+                    &assembled[..pos],
+                    MF_KIND,
+                    &MF_DIGEST,
+                ) {
+                    log!("   → Rejected QR payload hash/type mismatch");
+                    return;
+                }
                 process_confirmed_qr(&assembled[..pos], pos, ad, boot_display, delay, i2c);
             }
         }
@@ -994,25 +1038,9 @@ fn draw_mf_counter(
 /// Check if decoded data is a multi-frame fragment.
 #[inline(always)]
 fn is_multiframe(d: &[u8], len: usize) -> bool {
-    // Multi-frame wire format: [frame_idx, total_frames, frag_len, ...payload]
-    // Frame index > 0: accept by shape alone (previous frame 0 established the type).
-    // Frame index == 0: first payload byte must be a recognized format marker:
-    //   - "KSPT" or "kpub" (legacy ASCII formats)
-    //   - "PSKB" (kaspa-wallet-pskt bundle envelope, multi-frame)
-    //   - PAYLOAD_V1_RAW (0x01) — compact binary format (kpub, KSPT, etc.)
-    len >= 7
-        && d[1] >= 2 && d[1] as usize <= MF_MAX_FRAMES
-        && d[0] < d[1] && d[2] > 0
-        && (d[0] > 0
-            || (len >= 7 && (
-                &d[3..7] == b"KSPT"
-                || &d[3..7] == b"kpub"
-                || &d[3..7] == b"PSKB"
-                || &d[3..7] == b"COVB"
-                || &d[3..7] == b"COVI"
-                || &d[3..7] == b"STLH"
-                || d[3] == crate::qr::payload::PAYLOAD_V1_RAW
-            )))
+    crate::qr::multiframe::decode_frame(&d[..len])
+        .map(|frame| frame.total as usize <= MF_MAX_FRAMES)
+        .unwrap_or(false)
 }
 
 /// Handle a single rqrr decode result through the consecutive-match filter and routing.

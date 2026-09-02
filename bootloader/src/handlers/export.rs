@@ -337,9 +337,10 @@ pub fn handle_export_touch(
                         } else if (168..=298).contains(&x) && (100..=155).contains(&y) {
                             // Right: KasSigner — 2-frame V1-raw compact
                             // binary (1-byte header 0x01 + 78 raw bytes =
-                            // 79 bytes total, split across 2 V3 QRs at
-                            // 40 B/frame). Device-to-device only.
-                            ad.kpub_user_nframes = 2;
+                            // 79 bytes total, split across 4 V3 QRs. The
+                            // authenticated v2 header leaves 20 payload bytes
+                            // per V3 frame. Device-to-device only.
+                            ad.kpub_user_nframes = 4;
                             ad.app.state = crate::app::input::AppState::ExportKpub;
                             needs_redraw = true;
 
@@ -984,18 +985,14 @@ pub fn cycle_kpub_qr(
             }
 
             let n = ad.kpub_nframes as usize;
-            let balanced = (raw_len + n - 1) / n;
-            let offset = ad.kpub_frame as usize * balanced;
-            let remaining = raw_len.saturating_sub(offset);
-            let frag_len = remaining.min(balanced);
-            if frag_len > 0 {
-                let mut frame_buf = [0u8; 134];
-                frame_buf[0] = ad.kpub_frame;
-                frame_buf[1] = ad.kpub_nframes;
-                frame_buf[2] = frag_len as u8;
-                frame_buf[3..3 + frag_len]
-                    .copy_from_slice(&raw_buf[offset..offset + frag_len]);
-                let qr_len = if frag_len < 20 { 3 + 20 } else { 3 + frag_len };
+            if n > 1 {
+                let mut frame_buf = [0u8; 160];
+                let qr_len = match crate::qr::multiframe::encode_frame(
+                    &raw_buf[..raw_len], ad.kpub_frame, ad.kpub_nframes, &mut frame_buf,
+                ) {
+                    Ok(len) => len,
+                    Err(_) => return,
+                };
                 boot_display.draw_qr_screen_left(&frame_buf[..qr_len]);
                 let mut fc_buf: heapless::String<8> = heapless::String::new();
                 core::fmt::Write::write_fmt(&mut fc_buf,
