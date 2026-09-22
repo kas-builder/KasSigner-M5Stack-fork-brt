@@ -348,6 +348,10 @@ pub struct TransactionInput {
     /// see the same PSKT they sent, plus our additions. Empty for KSPT flow.
     pub incoming_partial_sigs: [IncomingPartialSig; MAX_SIGS_PER_INPUT],
     pub incoming_partial_sigs_count: u8,
+    /// KSPT v4 wallet derivation hint. Chain: 0 = absent, 1 = receive, 2 = change.
+    /// The hint is untrusted until its derived script is checked against this input.
+    pub derivation_chain: u8,
+    pub derivation_index: u16,
 }
 
 // ─── Transaction Output ───────────────────────────────────────────────
@@ -362,6 +366,10 @@ pub struct TransactionOutput {
     pub has_covenant: bool,
     pub covenant_auth_input: u16,
     pub covenant_id: [u8; 32],
+    /// KSPT v4 change-output hint. Chain: 0 = absent, 2 = change.
+    /// The hint is untrusted until its derived script is checked against this output.
+    pub derivation_chain: u8,
+    pub derivation_index: u16,
 }
 
 // ─── Transaction ──────────────────────────────────────────────────────

@@ -200,15 +200,30 @@ pub fn sign_and_serialize(
 
 /// Sign a transaction with multi-address support: each input is matched
 /// to the correct address index and signed with its privkey.
+#[derive(Debug)]
+enum SignExportError {
+    Signing(wallet::pskt::PsktError),
+    Serialization(wallet::pskt::PsktError),
+}
+
+fn sign_and_serialize_multi_detailed(
+    tx: &mut wallet::transaction::Transaction,
+    seed: &[u8; 64],
+    buf: &mut [u8],
+) -> Result<usize, SignExportError> {
+    wallet::pskt::sign_transaction_multi_addr(tx, seed, wallet::transaction::SigHashType::All)
+        .map_err(SignExportError::Signing)?;
+    wallet::pskt::serialize_signed_pskt(tx, buf)
+        .map_err(SignExportError::Serialization)
+}
+
 #[inline(never)]
 pub fn sign_and_serialize_multi(
     tx: &mut wallet::transaction::Transaction,
     seed: &[u8; 64],
     buf: &mut [u8],
 ) -> usize {
-    wallet::pskt::sign_transaction_multi_addr(tx, seed, wallet::transaction::SigHashType::All)
-        .and_then(|_| wallet::pskt::serialize_signed_pskt(tx, buf))
-        .unwrap_or(0)
+    sign_and_serialize_multi_detailed(tx, seed, buf).unwrap_or(0)
 }
 
 /// Sign a transaction with multisig support: tries all loaded seed slots,
@@ -595,6 +610,7 @@ pub fn handle_signing_step(
                 // On last input, sign all and serialize
                 // Use multi-address signing: each input is matched to the correct key
                 if (input_idx + 1) >= ad.app.total_inputs {
+                    let mut signing_error: Option<SignExportError> = None;
                     // Reset frame state from any previous signing
                     ad.signed_qr_nframes = 0;
                     ad.signed_qr_frame = 0;
@@ -684,12 +700,21 @@ pub fn handle_signing_step(
                         }
                     } else if let Some(slot) = ad.seed_mgr.active_slot() {
                         if slot.is_raw_key() {
-                            // Raw key: sign with stored privkey directly
-                            let mut key = [0u8; 32];
-                            slot.raw_key_bytes(&mut key);
-                            ad.signed_qr_len = sign_and_serialize(&mut ad.demo_tx, &key, &mut ad.signed_qr_buf);
-                            for b in key.iter_mut() {
-                                unsafe { core::ptr::write_volatile(b, 0); }
+                            // v4 paths describe HD wallet children, not a raw
+                            // private key. Never bypass path/script validation.
+                            if (0..ad.demo_tx.num_inputs).any(|i| {
+                                ad.demo_tx.inputs[i].derivation_chain != 0
+                            }) {
+                                log!("   ✗ KSPT v4 requires an HD seed");
+                                ad.signed_qr_len = 0;
+                            } else {
+                                // Raw key: sign with stored privkey directly
+                                let mut key = [0u8; 32];
+                                slot.raw_key_bytes(&mut key);
+                                ad.signed_qr_len = sign_and_serialize(&mut ad.demo_tx, &key, &mut ad.signed_qr_buf);
+                                for b in key.iter_mut() {
+                                    unsafe { core::ptr::write_volatile(b, 0); }
+                                }
                             }
                         } else {
                             // Check if any input is multisig or P2SH — use multisig signer
@@ -722,7 +747,15 @@ pub fn handle_signing_step(
                                 let mut seed = derive_seed_progress(
                                     &ad.mnemonic_indices, ad.word_count, pp, &mut progress,
                                 );
-                                ad.signed_qr_len = sign_and_serialize_multi(&mut ad.demo_tx, &seed.bytes, &mut ad.signed_qr_buf);
+                                match sign_and_serialize_multi_detailed(
+                                    &mut ad.demo_tx, &seed.bytes, &mut ad.signed_qr_buf,
+                                ) {
+                                    Ok(len) => ad.signed_qr_len = len,
+                                    Err(error) => {
+                                        signing_error = Some(error);
+                                        ad.signed_qr_len = 0;
+                                    }
+                                }
                                 if ad.signed_qr_len > 0 {
                                     boot_display.update_progress_bar(100);
                                 }
@@ -733,9 +766,36 @@ pub fn handle_signing_step(
                     log!("   Signed response: {} bytes", ad.signed_qr_len);
                     if ad.signed_qr_len == 0 {
                         log!("   ✗ Signing or response serialization failed; refusing empty QR");
+                        let detail = match signing_error {
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::InputDerivationMismatch(i))) =>
+                                alloc::format!("Input {} path mismatch", i as usize + 1),
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::ChangeDerivationMismatch(i))) =>
+                                alloc::format!("Change {} path mismatch", i as usize + 1),
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::InvalidDerivationHint)) =>
+                                alloc::format!("Invalid derivation hint"),
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::AccountDerivationFailed)) =>
+                                alloc::format!("Wallet account key failed"),
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::InputKeyDerivationFailed(i))) =>
+                                alloc::format!("Input {} key derivation failed", i as usize + 1),
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::InputSignatureFailed(i))) =>
+                                alloc::format!("Input {} Schnorr signing failed", i as usize + 1),
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::NoMatchingInput(true))) =>
+                                alloc::format!("V4 input was not signed"),
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::NoMatchingInput(false))) =>
+                                alloc::format!("Legacy input key not found"),
+                            Some(SignExportError::Signing(wallet::pskt::PsktError::NoInputs)) =>
+                                alloc::format!("Transaction has no inputs"),
+                            Some(SignExportError::Signing(_)) =>
+                                alloc::format!("Input signing failed"),
+                            Some(SignExportError::Serialization(wallet::pskt::PsktError::OutputBufferTooSmall)) =>
+                                alloc::format!("Signed response too large"),
+                            Some(SignExportError::Serialization(_)) =>
+                                alloc::format!("Response encoding failed"),
+                            None => alloc::format!("Transaction was not exported"),
+                        };
                         boot_display.draw_tx_error_screen(
                             "Signing failed",
-                            "Transaction was not exported");
+                            &detail);
                         sound::beep_error(delay);
                         ad.app.state = crate::app::input::AppState::Rejected;
                         ad.needs_redraw = false;

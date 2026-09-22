@@ -89,6 +89,14 @@ const SIGNED_MAGIC: [u8; 4] = [0x4B, 0x53, 0x53, 0x4E]; // "KSSN"
 /// Current format version
 const FORMAT_VERSION: u8 = 0x01;
 
+/// KSPT v4: v1 transaction data plus compact derivation hints.
+const FORMAT_VERSION_V4: u8 = 0x04;
+
+const DERIVATION_INDEX_MASK: u16 = 0x01FF;
+const DERIVATION_CHANGE_BIT: u16 = 0x8000;
+const DERIVATION_RESERVED_MASK: u16 = 0x7E00;
+const DERIVATION_NONE: u16 = 0xFFFF;
+
 /// KSPT v3: identical to v2 but redeem_len is u16 LE instead of u8.
 const FORMAT_VERSION_V3: u8 = 0x03;
 
@@ -119,8 +127,22 @@ pub enum PsktError {
     OutputBufferTooSmall,
     /// No inputs present
     NoInputs,
+    /// The active seed could not derive the Kaspa account key.
+    AccountDerivationFailed,
+    /// The selected input's private child key could not be derived.
+    InputKeyDerivationFailed(u8),
+    /// Schnorr signing failed for the selected input.
+    InputSignatureFailed(u8),
+    /// No input was signed; flag records whether exact v4 paths were present.
+    NoMatchingInput(bool),
     /// No outputs present
     NoOutputs,
+    /// Invalid or unsupported KSPT v4 derivation metadata
+    InvalidDerivationHint,
+    /// A supplied input path does not match the input script (zero-based position).
+    InputDerivationMismatch(u8),
+    /// A supplied change path does not match the output script (zero-based position).
+    ChangeDerivationMismatch(u8),
 }
 
 // ─── Reader helper (cursor over slice, no-alloc) ─────────────────
@@ -282,9 +304,10 @@ pub fn parse_pskt(data: &[u8], tx: &mut Transaction) -> Result<(), PsktError> {
     }
 
     let version = r.read_u8()?;
-    if version != FORMAT_VERSION {
+    if version != FORMAT_VERSION && version != FORMAT_VERSION_V4 {
         return Err(PsktError::UnsupportedVersion);
     }
+    let has_derivation_hints = version == FORMAT_VERSION_V4;
 
     let flags = r.read_u8()?; // bit 0x02 = has redeem scripts, bit 0x04 = has covenant bindings
     let has_redeem = (flags & 0x02) != 0;
@@ -347,6 +370,21 @@ pub fn parse_pskt(data: &[u8], tx: &mut Transaction) -> Result<(), PsktError> {
         tx.inputs[i].utxo_entry.script_public_key.script[..spk_len]
             .copy_from_slice(spk_bytes);
 
+        if has_derivation_hints {
+            let hint = r.read_u16_le()?;
+            if hint == DERIVATION_NONE || (hint & DERIVATION_RESERVED_MASK) != 0 {
+                return Err(PsktError::InvalidDerivationHint);
+            }
+            // v4 is the exact-path P2PK flow; a multisig/P2SH input must
+            // never enter a signer that ignores these HD hints.
+            if spk_version != 0 || spk_len != 34 || spk_bytes[0] != 0x20
+                || spk_bytes[33] != 0xAC {
+                return Err(PsktError::InvalidDerivationHint);
+            }
+            tx.inputs[i].derivation_chain = if (hint & DERIVATION_CHANGE_BIT) != 0 { 2 } else { 1 };
+            tx.inputs[i].derivation_index = hint & DERIVATION_INDEX_MASK;
+        }
+
         // Optional redeem script for P2SH inputs
         tx.inputs[i].redeem_script_len = 0;
         if has_redeem {
@@ -376,6 +414,24 @@ pub fn parse_pskt(data: &[u8], tx: &mut Transaction) -> Result<(), PsktError> {
         let spk_bytes = r.read_bytes(spk_len)?;
         tx.outputs[i].script_public_key.script[..spk_len]
             .copy_from_slice(spk_bytes);
+
+        if has_derivation_hints {
+            let hint = r.read_u16_le()?;
+            if hint == DERIVATION_NONE {
+                tx.outputs[i].derivation_chain = 0;
+                tx.outputs[i].derivation_index = 0;
+            } else {
+                if (hint & DERIVATION_RESERVED_MASK) != 0
+                    || (hint & DERIVATION_CHANGE_BIT) == 0
+                    || spk_version != 0 || spk_len != 34
+                    || spk_bytes[0] != 0x20 || spk_bytes[33] != 0xAC
+                {
+                    return Err(PsktError::InvalidDerivationHint);
+                }
+                tx.outputs[i].derivation_chain = 2;
+                tx.outputs[i].derivation_index = hint & DERIVATION_INDEX_MASK;
+            }
+        }
 
         // Covenant binding (flag 0x04)
         if has_covenant_data {
@@ -697,7 +753,11 @@ pub fn sign_transaction_multi_addr(
     use super::bip32;
 
     let account_key = bip32::derive_account_key(seed)
-        .map_err(|_| PsktError::NoInputs)?;
+        .map_err(|_| PsktError::AccountDerivationFailed)?;
+
+    // Check every v4 hint before producing any signature. A wrong path must
+    // never fall back to the legacy search or leave a partially signed tx.
+    validate_v4_derivations(tx, &account_key)?;
 
     let mut signed_count = 0usize;
 
@@ -711,32 +771,37 @@ pub fn sign_transaction_multi_addr(
         let mut target_pk = [0u8; 32];
         target_pk.copy_from_slice(&script.script[1..33]);
 
-        // Find which address index this pubkey belongs to (receive or change)
-        if let Some((idx, is_change)) = bip32::find_address_index_for_pubkey(&account_key, &target_pk) {
+        // v4 names the exact child key; v1 retains its legacy bounded search.
+        let match_path = match tx.inputs[i].derivation_chain {
+            1 => Some((tx.inputs[i].derivation_index, false)),
+            2 => Some((tx.inputs[i].derivation_index, true)),
+            _ => bip32::find_address_index_for_pubkey(&account_key, &target_pk),
+        };
+        if let Some((idx, is_change)) = match_path {
             // Derive the privkey for this index on the correct chain
             let key_result = if is_change {
                 bip32::derive_change_key(&account_key, idx)
             } else {
                 bip32::derive_address_key(&account_key, idx)
             };
-            if let Ok(addr_key) = key_result {
-                let privkey = addr_key.private_key_bytes();
-                let sig = sighash::sign_input(tx, i, privkey, sighash_type)
-                    .map_err(|_| PsktError::NoInputs)?;
+            let addr_key = key_result
+                .map_err(|_| PsktError::InputKeyDerivationFailed(i as u8))?;
+            let privkey = addr_key.private_key_bytes();
+            let sig = sighash::sign_input(tx, i, privkey, sighash_type)
+                .map_err(|_| PsktError::InputSignatureFailed(i as u8))?;
 
-                tx.inputs[i].signature = sig.bytes;
-                tx.inputs[i].sig_len = 64;
-                tx.inputs[i].sighash_type = sighash_type.to_byte();
-                tx.inputs[i].sigs[0].signature = sig.bytes;
-                tx.inputs[i].sigs[0].sighash_type = sighash_type.to_byte();
-                tx.inputs[i].sigs[0].pubkey_pos = 0;
-                tx.inputs[i].sigs[0].present = true;
-                if let Ok(pk_c) = addr_key.public_key_compressed() {
-                    tx.inputs[i].sigs[0].pubkey_compressed = pk_c;
-                }
-                tx.inputs[i].sig_count = 1;
-                signed_count += 1;
+            tx.inputs[i].signature = sig.bytes;
+            tx.inputs[i].sig_len = 64;
+            tx.inputs[i].sighash_type = sighash_type.to_byte();
+            tx.inputs[i].sigs[0].signature = sig.bytes;
+            tx.inputs[i].sigs[0].sighash_type = sighash_type.to_byte();
+            tx.inputs[i].sigs[0].pubkey_pos = 0;
+            tx.inputs[i].sigs[0].present = true;
+            if let Ok(pk_c) = addr_key.public_key_compressed() {
+                tx.inputs[i].sigs[0].pubkey_compressed = pk_c;
             }
+            tx.inputs[i].sig_count = 1;
+            signed_count += 1;
         } else if tx.has_stealth_tweak {
             // Stealth spend: signing key = account_privkey + tweak
             use k256::elliptic_curve::ScalarPrimitive;
@@ -780,7 +845,7 @@ pub fn sign_transaction_multi_addr(
                 combined_privkey.copy_from_slice(&combined_scalar.to_bytes());
 
                 let sig = sighash::sign_input(tx, i, &combined_privkey, sighash_type)
-                    .map_err(|_| PsktError::NoInputs)?;
+                    .map_err(|_| PsktError::InputSignatureFailed(i as u8))?;
 
                 // Zeroize the combined privkey
                 combined_privkey.fill(0);
@@ -803,10 +868,66 @@ pub fn sign_transaction_multi_addr(
     }
 
     if signed_count == 0 {
-        return Err(PsktError::NoInputs);
+        let is_v4 = (0..tx.num_inputs).any(|i| tx.inputs[i].derivation_chain != 0);
+        return Err(PsktError::NoMatchingInput(is_v4));
     }
 
     Ok(signed_count)
+}
+
+/// Verify all v4 input and change-output hints against the actual scripts.
+/// The metadata is only a lookup hint; the derived pubkey is the authority.
+pub fn validate_v4_derivations(
+    tx: &Transaction,
+    account_key: &super::bip32::ExtendedPrivKey,
+) -> Result<(), PsktError> {
+    use super::bip32;
+    let is_v4 = (0..tx.num_inputs).any(|i| tx.inputs[i].derivation_chain != 0);
+    if !is_v4 {
+        return Ok(());
+    }
+    for i in 0..tx.num_inputs {
+        let input = &tx.inputs[i];
+        let key = match input.derivation_chain {
+            1 => bip32::derive_address_key(account_key, input.derivation_index),
+            2 => bip32::derive_change_key(account_key, input.derivation_index),
+            _ => return Err(PsktError::InvalidDerivationHint),
+        }.map_err(|_| PsktError::InputDerivationMismatch(i as u8))?;
+        let pk = key.public_key_x_only()
+            .map_err(|_| PsktError::InputDerivationMismatch(i as u8))?;
+        let spk = &input.utxo_entry.script_public_key;
+        if spk.version != 0 || spk.script_len != 34 || spk.script[0] != 0x20
+            || spk.script[33] != 0xAC || spk.script[1..33] != pk {
+            return Err(PsktError::InputDerivationMismatch(i as u8));
+        }
+    }
+    for i in 0..tx.num_outputs {
+        let output = &tx.outputs[i];
+        if output.derivation_chain != 0
+            && !verified_change_output(output, account_key) {
+            return Err(PsktError::ChangeDerivationMismatch(i as u8));
+        }
+    }
+    Ok(())
+}
+
+/// True only when the hinted change path derives the exact output script.
+pub fn verified_change_output(
+    output: &TransactionOutput,
+    account_key: &super::bip32::ExtendedPrivKey,
+) -> bool {
+    if output.derivation_chain != 2 {
+        return false;
+    }
+    let spk = &output.script_public_key;
+    if spk.version != 0 || spk.script_len != 34
+        || spk.script[0] != 0x20 || spk.script[33] != 0xAC {
+        return false;
+    }
+    super::bip32::derive_change_key(account_key, output.derivation_index)
+        .and_then(|key| key.public_key_x_only())
+        .map(|pk| spk.script[1..33] == pk)
+        .unwrap_or(false)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1590,6 +1711,282 @@ pub fn test_invalid_magic() -> bool {
 }
 
 #[cfg(any(test, feature = "verbose-boot"))]
+fn serialize_v4_test_payload(
+    tx: &Transaction,
+    input_hints: &[u16; MAX_INPUTS],
+    output_hints: &[u16; MAX_OUTPUTS],
+    output: &mut [u8],
+) -> Result<usize, PsktError> {
+    let mut w = ByteWriter::new(output);
+    w.write_bytes(&PSKT_MAGIC)?;
+    w.write_u8(FORMAT_VERSION_V4)?;
+    w.write_u8(0)?;
+    w.write_u16_le(tx.version)?;
+    w.write_u8(tx.num_inputs as u8)?;
+    w.write_u8(tx.num_outputs as u8)?;
+    w.write_u64_le(tx.locktime)?;
+    w.write_bytes(&tx.subnetwork_id)?;
+    w.write_u64_le(tx.gas)?;
+    w.write_u16_le(tx.payload_len as u16)?;
+    w.write_bytes(&tx.payload[..tx.payload_len])?;
+
+    for i in 0..tx.num_inputs {
+        let input = &tx.inputs[i];
+        w.write_bytes(&input.previous_outpoint.transaction_id)?;
+        w.write_bytes(&input.previous_outpoint.index.to_le_bytes())?;
+        w.write_u64_le(input.utxo_entry.amount)?;
+        w.write_u64_le(input.sequence)?;
+        w.write_u8(input.sig_op_count)?;
+        w.write_u16_le(input.utxo_entry.script_public_key.version)?;
+        w.write_spk_len(input.utxo_entry.script_public_key.script_len)?;
+        w.write_bytes(input.utxo_entry.script_public_key.script_bytes())?;
+        w.write_u16_le(input_hints[i])?;
+    }
+
+    for i in 0..tx.num_outputs {
+        let output_tx = &tx.outputs[i];
+        w.write_u64_le(output_tx.value)?;
+        w.write_u16_le(output_tx.script_public_key.version)?;
+        w.write_spk_len(output_tx.script_public_key.script_len)?;
+        w.write_bytes(output_tx.script_public_key.script_bytes())?;
+        w.write_u16_le(output_hints[i])?;
+    }
+
+    Ok(w.written())
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+fn derivation_test_transaction() -> Transaction {
+    let mut tx = Transaction::new();
+    tx.num_inputs = 2;
+    tx.num_outputs = 2;
+    for i in 0..tx.num_inputs {
+        tx.inputs[i].previous_outpoint.transaction_id = [0x10 + i as u8; 32];
+        tx.inputs[i].utxo_entry.amount = 200_000_000;
+        tx.inputs[i].sequence = u64::MAX;
+        tx.inputs[i].sig_op_count = 1;
+        tx.inputs[i].utxo_entry.script_public_key.script[0] = 0x20;
+        tx.inputs[i].utxo_entry.script_public_key.script[33] = 0xAC;
+        tx.inputs[i].utxo_entry.script_public_key.script_len = 34;
+    }
+    for i in 0..tx.num_outputs {
+        tx.outputs[i].value = 199_000_000;
+        tx.outputs[i].script_public_key.script[0] = 0x20;
+        tx.outputs[i].script_public_key.script[33] = 0xAC;
+        tx.outputs[i].script_public_key.script_len = 34;
+    }
+    tx
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+/// Test: v4 preserves receive/change input hints and an optional change output hint.
+pub fn test_v4_derivation_hints() -> bool {
+    let tx = derivation_test_transaction();
+    let mut input_hints = [0u16; MAX_INPUTS];
+    input_hints[0] = 100;
+    input_hints[1] = DERIVATION_CHANGE_BIT | 511;
+    let mut output_hints = [DERIVATION_NONE; MAX_OUTPUTS];
+    output_hints[1] = DERIVATION_CHANGE_BIT | 100;
+
+    let mut encoded = [0u8; 512];
+    let size = match serialize_v4_test_payload(
+        &tx,
+        &input_hints,
+        &output_hints,
+        &mut encoded,
+    ) {
+        Ok(size) => size,
+        Err(_) => return false,
+    };
+    let mut parsed = Transaction::new();
+    if parse_pskt(&encoded[..size], &mut parsed).is_err() {
+        return false;
+    }
+
+    parsed.inputs[0].derivation_chain == 1
+        && parsed.inputs[0].derivation_index == 100
+        && parsed.inputs[1].derivation_chain == 2
+        && parsed.inputs[1].derivation_index == 511
+        && parsed.outputs[0].derivation_chain == 0
+        && parsed.outputs[1].derivation_chain == 2
+        && parsed.outputs[1].derivation_index == 100
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+/// Test: v4 rejects missing input hints and reserved derivation bits.
+pub fn test_v4_rejects_invalid_input_hints() -> bool {
+    let tx = derivation_test_transaction();
+    let mut input_hints = [0u16; MAX_INPUTS];
+    let output_hints = [DERIVATION_NONE; MAX_OUTPUTS];
+    let mut encoded = [0u8; 512];
+
+    input_hints[0] = DERIVATION_NONE;
+    let missing_size = match serialize_v4_test_payload(
+        &tx,
+        &input_hints,
+        &output_hints,
+        &mut encoded,
+    ) {
+        Ok(size) => size,
+        Err(_) => return false,
+    };
+    let mut parsed = Transaction::new();
+    if parse_pskt(&encoded[..missing_size], &mut parsed)
+        != Err(PsktError::InvalidDerivationHint)
+    {
+        return false;
+    }
+
+    input_hints[0] = 0x0200;
+    let reserved_size = match serialize_v4_test_payload(
+        &tx,
+        &input_hints,
+        &output_hints,
+        &mut encoded,
+    ) {
+        Ok(size) => size,
+        Err(_) => return false,
+    };
+    parse_pskt(&encoded[..reserved_size], &mut parsed)
+        == Err(PsktError::InvalidDerivationHint)
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+/// Test: an output derivation hint may only identify the change chain.
+pub fn test_v4_rejects_receive_output_hint() -> bool {
+    let tx = derivation_test_transaction();
+    let input_hints = [0u16; MAX_INPUTS];
+    let mut output_hints = [DERIVATION_NONE; MAX_OUTPUTS];
+    output_hints[0] = 7;
+    let mut encoded = [0u8; 512];
+    let size = match serialize_v4_test_payload(
+        &tx,
+        &input_hints,
+        &output_hints,
+        &mut encoded,
+    ) {
+        Ok(size) => size,
+        Err(_) => return false,
+    };
+    let mut parsed = Transaction::new();
+    parse_pskt(&encoded[..size], &mut parsed) == Err(PsktError::InvalidDerivationHint)
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+fn signing_path_test_tx(
+    account: &super::bip32::ExtendedPrivKey,
+    index: u16,
+    change: bool,
+    hinted: bool,
+) -> Option<Transaction> {
+    let key = if change {
+        super::bip32::derive_change_key(account, index).ok()?
+    } else {
+        super::bip32::derive_address_key(account, index).ok()?
+    };
+    let pk = key.public_key_x_only().ok()?;
+    let mut tx = Transaction::new();
+    tx.num_inputs = 1;
+    tx.num_outputs = 1;
+    tx.inputs[0].previous_outpoint.transaction_id = [0x42; 32];
+    tx.inputs[0].utxo_entry.amount = 200_000_000;
+    tx.inputs[0].sig_op_count = 1;
+    let spk = &mut tx.inputs[0].utxo_entry.script_public_key;
+    spk.script_len = 34;
+    spk.script[0] = 0x20;
+    spk.script[1..33].copy_from_slice(&pk);
+    spk.script[33] = 0xAC;
+    if hinted {
+        tx.inputs[0].derivation_chain = if change { 2 } else { 1 };
+        tx.inputs[0].derivation_index = index;
+    }
+    tx.outputs[0].value = 199_000_000;
+    Some(tx)
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+/// Direct high-index receive/change signing, with no bounded address search.
+pub fn test_v4_high_index_signing() -> bool {
+    let seed = super::bip39::seed_from_mnemonic_12(
+        &super::bip39::mnemonic_from_entropy_12(&[0x42u8; 16]), "");
+    let account = match super::bip32::derive_account_key(&seed.bytes) {
+        Ok(account) => account,
+        Err(_) => return false,
+    };
+    for (index, change) in [(100u16, false), (511u16, true)] {
+        let mut tx = match signing_path_test_tx(&account, index, change, true) {
+            Some(tx) => tx,
+            None => return false,
+        };
+        if sign_transaction_multi_addr(&mut tx, &seed.bytes, SigHashType::All) != Ok(1)
+            || tx.inputs[0].sig_len != 64 {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+/// A false hint fails before any signature; valid change output must match.
+pub fn test_v4_derivation_mismatch() -> bool {
+    let seed = super::bip39::seed_from_mnemonic_12(
+        &super::bip39::mnemonic_from_entropy_12(&[0x42u8; 16]), "");
+    let account = match super::bip32::derive_account_key(&seed.bytes) {
+        Ok(account) => account,
+        Err(_) => return false,
+    };
+    let mut tx = match signing_path_test_tx(&account, 100, true, true) {
+        Some(tx) => tx,
+        None => return false,
+    };
+    tx.inputs[0].derivation_index = 101;
+    if sign_transaction_multi_addr(&mut tx, &seed.bytes, SigHashType::All)
+        != Err(PsktError::InputDerivationMismatch(0)) || tx.inputs[0].sig_len != 0 {
+        return false;
+    }
+    tx.inputs[0].derivation_index = 100;
+    let change_key = match super::bip32::derive_change_key(&account, 511) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+    let pk = match change_key.public_key_x_only() {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+    let output = &mut tx.outputs[0];
+    output.derivation_chain = 2;
+    output.derivation_index = 511;
+    output.script_public_key.script_len = 34;
+    output.script_public_key.script[0] = 0x20;
+    output.script_public_key.script[1..33].copy_from_slice(&pk);
+    output.script_public_key.script[33] = 0xAC;
+    if !verified_change_output(output, &account)
+        || validate_v4_derivations(&tx, &account).is_err() {
+        return false;
+    }
+    tx.outputs[0].derivation_index = 510;
+    !verified_change_output(&tx.outputs[0], &account)
+        && validate_v4_derivations(&tx, &account) == Err(PsktError::ChangeDerivationMismatch(0))
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
+/// Older v1 inputs still use the original low-index search path.
+pub fn test_v1_legacy_signing_path() -> bool {
+    let seed = super::bip39::seed_from_mnemonic_12(
+        &super::bip39::mnemonic_from_entropy_12(&[0x42u8; 16]), "");
+    let account = match super::bip32::derive_account_key(&seed.bytes) {
+        Ok(account) => account,
+        Err(_) => return false,
+    };
+    let mut tx = match signing_path_test_tx(&account, 0, false, false) {
+        Some(tx) => tx,
+        None => return false,
+    };
+    sign_transaction_multi_addr(&mut tx, &seed.bytes, SigHashType::All) == Ok(1)
+        && tx.inputs[0].sig_len == 64
+}
+
+#[cfg(any(test, feature = "verbose-boot"))]
 /// Test: complete KSPT parse → sign → serialize flow.
 pub fn test_full_sign_flow() -> bool {
     use super::bip39;
@@ -1759,7 +2156,7 @@ pub fn test_nine_inputs_rejected() -> bool {
 #[cfg(any(test, feature = "verbose-boot"))]
 pub fn run_pskt_tests() -> (u32, u32) {
     let mut passed = 0u32;
-    let total = 8u32;
+    let total = 14u32;
 
     if test_serialize_parse_roundtrip() { passed += 1; }
     if test_invalid_magic() { passed += 1; }
@@ -1769,6 +2166,12 @@ pub fn run_pskt_tests() -> (u32, u32) {
     if test_standard_signed_input_count(7) { passed += 1; }
     if test_standard_signed_input_count(8) { passed += 1; }
     if test_nine_inputs_rejected() { passed += 1; }
+    if test_v4_derivation_hints() { passed += 1; }
+    if test_v4_rejects_invalid_input_hints() { passed += 1; }
+    if test_v4_rejects_receive_output_hint() { passed += 1; }
+    if test_v4_high_index_signing() { passed += 1; }
+    if test_v4_derivation_mismatch() { passed += 1; }
+    if test_v1_legacy_signing_path() { passed += 1; }
 
     (passed, total)
 }

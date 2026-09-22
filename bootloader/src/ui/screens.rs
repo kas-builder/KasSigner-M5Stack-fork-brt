@@ -408,7 +408,8 @@ impl<'a> BootDisplay<'a> {
 
         /// Draw a transaction review page (amount, fee, addresses).
 pub fn draw_tx_page(&mut self, tx: &crate::wallet::transaction::Transaction, page: u8,
-        receive_pks: &[[u8; 32]; 20], change_pks: &[[u8; 32]; 5]) {
+        receive_pks: &[[u8; 32]; 20], change_pks: &[[u8; 32]; 5],
+        account_key_raw: Option<&[u8; 65]>) {
         self.display.clear(COLOR_BG).ok();
 
         use core::fmt::Write;
@@ -539,6 +540,15 @@ pub fn draw_tx_page(&mut self, tx: &crate::wallet::transaction::Transaction, pag
                         for pk in change_pks.iter() {
                             if *pk != [0u8; 32] && *pk == out_pk { is_change = true; break; }
                         }
+                    }
+                }
+                // A v4 high-index change hint is displayed only after the
+                // active wallet's derived key matches this exact script.
+                if let Some(raw) = account_key_raw {
+                    let account = crate::wallet::bip32::ExtendedPrivKey::from_raw(raw);
+                    if crate::wallet::pskt::verified_change_output(output, &account) {
+                        is_change = true;
+                        is_own = false;
                     }
                 }
 

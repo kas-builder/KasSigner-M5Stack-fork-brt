@@ -428,21 +428,21 @@ fn process_confirmed_qr(
                 }
             }
         } else {
-            // v1 KSPT: unsigned (original format)
+            // v1 or v4 KSPT: unsigned transaction
             ad.tx_sigs_present = 0;
             ad.tx_sigs_required = 0;
             match wallet::pskt::parse_pskt(data, &mut ad.demo_tx) {
                 Ok(()) => {
                     ad.tx_input_format = crate::app::data::TxInputFormat::KsptV1;
-                    log!("   → KSPT v1: {} in, {} out",
-                        ad.demo_tx.num_inputs, ad.demo_tx.num_outputs);
+                    log!("   → KSPT v{}: {} in, {} out",
+                        pskt_version, ad.demo_tx.num_inputs, ad.demo_tx.num_outputs);
                     ad.app.start_review(
                         ad.demo_tx.num_outputs as u8,
                         ad.demo_tx.num_inputs as u8);
                     ad.needs_redraw = true;
                 }
                 Err(e) => {
-                    log!("   → KSPT v1 parse error: {:?}", e);
+                    log!("   → KSPT v{} parse error: {:?}", pskt_version, e);
                     boot_display.draw_tx_error_screen("Too many UTXOs", "Consolidate first");
                     sound::beep_error(delay);
                     ad.app.state = crate::app::input::AppState::Rejected;

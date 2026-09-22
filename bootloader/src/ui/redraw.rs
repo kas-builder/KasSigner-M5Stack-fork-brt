@@ -452,7 +452,8 @@ pub fn redraw_screen(
                 }
                 crate::app::input::AppState::ReviewTx { page } => {
                     boot_display.draw_tx_page(&ad.demo_tx, page,
-                        &ad.pubkey_cache, &ad.change_pubkey_cache);
+                        &ad.pubkey_cache, &ad.change_pubkey_cache,
+                        if ad.pubkeys_cached { Some(&ad.acct_key_raw) } else { None });
                 }
                 crate::app::input::AppState::ConfirmTx => {
                     let mut amt_buf = [0u8; 20];
