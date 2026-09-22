@@ -109,7 +109,7 @@ if [ "$MODE" = "development" ] && [ -n "$SIGN_ARG" ]; then
 fi
 
 if [ "$MODE" = "production" ]; then
-    cargo run --quiet --manifest-path tools/Cargo.toml --bin release-manifest -- \
+    cargo run --manifest-path tools/Cargo.toml --bin release-manifest -- \
         check-key "$SIGN_ARG"
 
     COMMIT="$(git rev-parse --verify HEAD)"
@@ -161,7 +161,10 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     echo "── Iteration $i/$MAX_ITERATIONS ──────────────────────────"
 
     espflash save-image --chip esp32s3 "$ELF" "$BIN"
-    HASH_OUTPUT=$(run_hash_tool 2>&1)
+    if ! HASH_OUTPUT=$(run_hash_tool 2>&1 | tee /dev/tty); then
+        printf '%s\n' "$HASH_OUTPUT" >&2
+        exit 1
+    fi
     CURRENT_HASH=$(echo "$HASH_OUTPUT" | grep "SHA256:" | awk '{print $2}')
     SEG_SIZE=$(echo "$HASH_OUTPUT" | grep "Segment size:" | awk '{print $3}')
     SIGNED=$(echo "$HASH_OUTPUT" | grep "Status:" | head -1)
@@ -197,7 +200,10 @@ fi
 echo ""
 echo "[Final] Generating and verifying final .bin..."
 espflash save-image --chip esp32s3 "$ELF" "$BIN"
-FINAL_OUTPUT=$(run_hash_tool 2>&1)
+if ! FINAL_OUTPUT=$(run_hash_tool 2>&1 | tee /dev/tty); then
+    printf '%s\n' "$FINAL_OUTPUT" >&2
+    exit 1
+fi
 FINAL_HASH=$(echo "$FINAL_OUTPUT" | grep "SHA256:" | awk '{print $2}')
 FINAL_STATUS=$(echo "$FINAL_OUTPUT" | grep "Status:" | head -1)
 

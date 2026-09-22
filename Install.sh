@@ -13,7 +13,7 @@ PORT="${2:-}"
 die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
 
 verify_release() {
-    cargo run --quiet --manifest-path "$SCRIPT_DIR/tools/Cargo.toml" \
+    cargo run --manifest-path "$SCRIPT_DIR/tools/Cargo.toml" \
         --bin release-manifest -- verify \
         "$ARTIFACT" "$MANIFEST" "$SIGNATURE" "$PUBLIC_KEY"
 }
@@ -23,6 +23,7 @@ printf 'Release directory: %s\n\n' "$RELEASE_DIR"
 
 # Verification is deliberately the first operation. Do not detect, erase, or
 # communicate with a device until every local release input has authenticated.
+printf '[verify] Authenticating signed release before device access...\n'
 verify_release
 printf '\nRelease authentication passed before device access.\n'
 
@@ -63,12 +64,16 @@ read -r -p "Type ERASE-M5STACK to continue: " confirmation </dev/tty
 
 # Re-authenticate immediately before the first destructive command. This
 # catches replacement between the initial check and user confirmation.
+printf '[verify] Rechecking signed release before erase...\n'
 verify_release
+printf '[erase] Erasing M5 flash...\n'
 espflash erase-flash --chip esp32s3 --port "$PORT" --non-interactive
 
 # Re-authenticate again after erase and immediately before flashing. The exact
 # file verified here is the exact path passed to espflash.
+printf '[verify] Rechecking signed release before write...\n'
 verify_release
+printf '[flash] Writing signed M5 firmware...\n'
 espflash write-bin --chip esp32s3 --port "$PORT" --non-interactive 0x0 "$ARTIFACT"
 
 # Read back exactly the authenticated artifact length and compare every byte.
@@ -81,6 +86,7 @@ ARTIFACT_SIZE="$(wc -c < "$ARTIFACT" | tr -d '[:space:]')"
 case "$ARTIFACT_SIZE" in
     ''|*[!0-9]*) die "authenticated artifact size is invalid" ;;
 esac
+printf '[read-back] Reading the flashed image for byte-for-byte comparison...\n'
 espflash read-flash --chip esp32s3 --port "$PORT" --non-interactive \
     0x0 "$ARTIFACT_SIZE" "$READBACK"
 cmp -s "$ARTIFACT" "$READBACK" \
